@@ -1,0 +1,181 @@
+@import "tailwindcss";
+
+/*
+ * Midnight (the default theme): one solid, dark blue look. Every surface is opaque, and depth
+ * comes from three steps of navy (the page, panels and cards, then hovers and
+ * inputs) with a hairline border between them. Components only use these
+ * tokens, so this is the theme.
+ *
+ * The accent and danger colors each come in two strengths: the plain one
+ * fills buttons and badges (white text reads on it), `accent-bright` is for
+ * accent text and icons on navy, and `danger-strong` fills danger buttons
+ * (`danger` itself is light enough for text). Contrast is at least 4.5:1
+ * for text on every surface, and `input` (the edges of form controls) at
+ * least 3:1, so a control's outline is easy to make out.
+ */
+:root {
+  --background: #0b1222;
+  --surface: #111b30;
+  --surface-2: #18243d;
+  --border: #24324f;
+  --input: #5a6f99;
+  --foreground: #e5ecf6;
+  --muted: #8e9cb7;
+  --accent: #2563eb;
+  --accent-bright: #78aefc;
+  --accent-foreground: #ffffff;
+  --danger: #f87171;
+  --danger-strong: #dc2626;
+  --warning: #fbbf24;
+  --online: #34d399;
+  color-scheme: dark;
+}
+
+/*
+ * Daylight: the same system in light. Panels and cards are white on a
+ * cool gray page, with the same contrast floors: 4.5:1 for text (the accent,
+ * danger, warning and online colors are dark enough to be text too) and 3:1
+ * for `input`. Picked in Settings > Appearance ("Light", or "Match system"
+ * while the device is light); see lib/chat/appearance.ts.
+ */
+:root[data-theme="light"] {
+  --background: #f3f5f9;
+  --surface: #ffffff;
+  --surface-2: #e9edf4;
+  --border: #d5dce8;
+  --input: #717e98;
+  --foreground: #111827;
+  --muted: #4f5b70;
+  --accent: #2563eb;
+  --accent-bright: #1d4ed8;
+  --accent-foreground: #ffffff;
+  --danger: #b91c1c;
+  --danger-strong: #dc2626;
+  --warning: #92400e;
+  --online: #047857;
+  --shadow: rgb(15 23 42 / 0.18);
+  --backdrop: rgb(15 23 42 / 0.45);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    --background: #f3f5f9;
+    --surface: #ffffff;
+    --surface-2: #e9edf4;
+    --border: #d5dce8;
+    --input: #717e98;
+    --foreground: #111827;
+    --muted: #4f5b70;
+    --accent: #2563eb;
+    --accent-bright: #1d4ed8;
+    --accent-foreground: #ffffff;
+    --danger: #b91c1c;
+    --danger-strong: #dc2626;
+    --warning: #92400e;
+    --online: #047857;
+    --shadow: rgb(15 23 42 / 0.18);
+    --backdrop: rgb(15 23 42 / 0.45);
+    color-scheme: light;
+  }
+}
+
+/* Text size: everything is sized in rem, so it all scales together. */
+:root[data-text-size="small"] {
+  font-size: 87.5%;
+}
+
+:root[data-text-size="large"] {
+  font-size: 112.5%;
+}
+
+/* `dense:` styles apply in compact density (Settings > Appearance). */
+@custom-variant dense (&:where([data-density="compact"] *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-bright: var(--accent-bright);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+  --color-danger-strong: var(--danger-strong);
+  --color-warning: var(--warning);
+  --color-online: var(--online);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+@layer components {
+  /* Floating surfaces (dialogs, menus, popovers, toasts) sit on a soft, solid shadow. */
+  .bg-surface.shadow-xl,
+  .bg-surface.shadow-2xl {
+    box-shadow:
+      0 0 0 1px rgb(0 0 0 / 0.2),
+      0 20px 48px -12px var(--shadow, rgb(2 6 18 / 0.75));
+  }
+
+  /* Small all-caps labels (section headings, "QUIZ") are spaced out to stay legible. */
+  .uppercase {
+    letter-spacing: 0.06em;
+  }
+}
+
+/* Thin, quiet scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Native dialogs: the page behind just dims. */
+dialog::backdrop {
+  background-color: var(--backdrop, rgb(3 7 18 / 0.72));
+}
+
+/* Brief highlight on a message after jumping to it from a reply. */
+@keyframes message-flash {
+  from {
+    background-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+}
+
+.message-flash {
+  animation: message-flash 1.6s ease-out;
+}
+
+/* Typing indicator dots. */
+@keyframes typing-dot {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.typing-dot {
+  animation: typing-dot 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+}
