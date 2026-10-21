@@ -8,6 +8,10 @@ export type Message = {
   authorId: string;
   text: string;
   createdAt: number;
+  /** Forum posts (a forum channel's top-level messages) only. */
+  title?: string;
+  /** Forum posts only: ids of the forum's tags it carries (see Subgroup.tags; unknown ones are ignored). */
+  tags?: string[];
   attachments?: Attachment[];
   /** Set when the author edited the text. */
   editedAt?: number;
@@ -50,12 +54,20 @@ export type SystemEvent =
   | { type: "channel_rename"; from: string; to: string }
   /** Changed the channel's topic; absent when they cleared it. */
   | { type: "channel_topic"; topic?: string }
+  /** Turned disappearing messages on (`after`, in seconds) or off (absent). */
+  | { type: "channel_disappear"; after?: number }
   /** Kicked a member from the group (posted in its main channel). */
   | { type: "member_kick"; memberId: string }
   /** Banned a member from the group (posted in its main channel). */
   | { type: "member_ban"; memberId: string }
   /** Gave a member a new role in the group; "owner" when they transferred ownership (posted in its main channel). */
   | { type: "member_role"; memberId: string; role: MemberRole };
+
+/** One version of an edited message's text, and when it was written (ms). */
+export type MessageVersion = { text: string; at: number };
+
+/** Most earlier versions "message:history" returns (the newest ones). */
+export const MAX_EDIT_HISTORY = 50;
 
 /** When a message was pinned (ms), and by whom (a member id). */
 export type Pin = { at: number; by: string };
@@ -102,6 +114,31 @@ export type WikiSaveResult =
   /** `page` is the current version when the save lost a race with someone else's. */
   | { ok: false; error: string; page?: WikiPage };
 
+/** How a forum lists its posts: by their latest activity (posted, or a reply), or when they were posted. */
+export type ForumSort = "activity" | "newest";
+
+/** What "forum:posts" lists: every post, or only ones matching all of `query`'s words (in the title or text) and carrying `tag`. */
+export type ForumQuery = { sort: ForumSort; query?: string; tag?: string };
+
+/**
+ * A page of a forum's posts in its order, plus everyone they refer to.
+ * `cursor` fetches the next page. `boundary` (ms) is where this page ends in
+ * the order (the last post's activity, or posting time): every matching post
+ * from before it on is in this page or an earlier one.
+ */
+export type ForumPage = {
+  messages: Message[];
+  users: User[];
+  hasMore: boolean;
+  cursor?: string;
+  boundary?: number;
+};
+
+/** When a forum post was last active: posted, or its thread's latest reply (as messages.active_at). */
+export function postActivity(post: Pick<Message, "createdAt" | "thread">) {
+  return Math.max(post.createdAt, post.thread?.lastAt ?? 0);
+}
+
 /** A thread: its root and replies (oldest first). `root: null` if it's gone. */
 export type ThreadPage = {
   root: Message | null;
@@ -120,6 +157,11 @@ export type SearchPage = {
 };
 
 export const MIN_SEARCH_LENGTH = 2;
+
+/** What a search's "has:" can ask for: an attachment of that kind, or (link) a URL in the text. */
+export const SEARCH_HAS = ["link", "image", "video", "file", "audio", "voice", "poll", "quiz", "event", "sticker"] as const;
+
+export type SearchHas = (typeof SEARCH_HAS)[number];
 
 /** A page of channel history, oldest first, plus everyone it refers to. */
 export type HistoryPage = {
@@ -166,6 +208,14 @@ export type TypingEvent = { subgroupId: string; userId: string; typing: boolean 
 export const MAX_REACTIONS_PER_MESSAGE = 20;
 
 export const MAX_MESSAGE_LENGTH = 2000;
+
+/** Forum post titles (mirrored in lib/server/constants.ts and a check on messages.title). */
+export const MAX_TITLE_LENGTH = 100;
+
+/** A title on one line (mirrors cleanTitle in lib/server/validation.ts). */
+export function cleanTitle(title: string) {
+  return title.trim().replace(/\s+/g, " ");
+}
 
 export const MAX_PAGE_LENGTH = 20000;
 

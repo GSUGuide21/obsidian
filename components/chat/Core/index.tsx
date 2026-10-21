@@ -11,10 +11,15 @@ import Thread from "@/components/chat/Container/Thread";
 import Users, { type MemberActions } from "@/components/chat/Container/Users";
 import Discover from "@/components/chat/Discover";
 import GroupList from "@/components/chat/GroupList";
+import { ChannelLinksContext, type ChannelLinks } from "@/components/chat/Core/ChannelLinks";
 import Join from "@/components/chat/Join";
+import { ResetPasswordDialog } from "@/components/chat/Password";
 import GroupSettings from "@/components/chat/GroupSettings";
 import ManageDialog, { type GroupSettingsSection, type ManageTarget } from "@/components/chat/Manage";
 import NewDmDialog from "@/components/chat/NewDm";
+import QuickSwitcher, { isSwitcherShortcut } from "@/components/chat/QuickSwitcher";
+import ShortcutsDialog from "@/components/chat/Shortcuts";
+import { isTyping, shortcutFor, stepChannel } from "@/lib/chat/shortcuts";
 import type { ProfileDraft } from "@/components/chat/Profile";
 import { STATUS_LABELS } from "@/components/chat/Status";
 import { authorName, summarize } from "@/lib/chat/format";
@@ -27,15 +32,18 @@ import { withGroupProfiles } from "@/lib/chat/profile";
 import {
   canAnnounce,
   canManageGroup,
-  canManageMessages,
+  allows,
   canPin,
   dmName,
   groupRole,
+  groupStanding,
   isDm,
   isMine,
   isOnline,
+  mayActOn,
+  memberStanding,
   notificationLevel,
-  roleOf,
+  type Group,
   type Message,
   type Notify,
   type NotifyReason,
@@ -44,6 +52,7 @@ import {
 import { ChatProvider, useChatContext } from "@/components/chat/Core/ChatContext";
 import InviteJoin from "@/components/chat/InviteJoin";
 import { captureInvite, clearInvite, pendingInvite } from "@/lib/chat/invites";
+import { captureOpenLink, takeOpenLink } from "@/lib/chat/openLink";
 import { registerServiceWorker, syncPushSubscription } from "@/lib/chat/push";
 import type { ChatIdentity } from "@/lib/chat/useChat";
 
@@ -55,6 +64,7 @@ import {
   updateProfile,
   useSession,
 } from "@/lib/supabase/useSession";
+import { providerLabel } from "@/lib/supabase/providers";
 
 export default function Core() {
   const guest = useIdentity();
@@ -63,6 +73,7 @@ export default function Core() {
   // installable, and an invite link's code is kept until the chat connects.
   useEffect(() => {
     captureInvite();
+    captureOpenLink();
     void registerServiceWorker();
   }, []);
   // Guest identity lives in localStorage and the session loads in the browser,
@@ -78,10 +89,16 @@ export default function Core() {
       avatarUrl: profile.avatarUrl,
       getAccessToken,
     };
-    const account = { email: session.user.email, providerAvatar: profile.providerAvatar, photo: profile.photo };
+    const account = {
+      email: session.user.email,
+      provider: providerLabel(session.user.app_metadata.provider),
+      providerAvatar: profile.providerAvatar,
+      photo: profile.photo,
+    };
     return (
       <ChatProvider key={identity.id} identity={identity}>
         <ChatApp account={account} onSaveProfile={updateProfile} onSignOut={supabaseSignOut} />
+        <ResetPasswordDialog />
       </ChatProvider>
     );
   }
@@ -103,7 +120,8 @@ export default function Core() {
 
 type ChatAppProps = {
   /** Signed-in users only. */
-  account?: { email?: string; providerAvatar?: string; photo: PhotoChoice };
+  /** `provider`: how they sign in ("Google", "email"…), when it's one we know. */
+  account?: { email?: string; provider?: string; providerAvatar?: string; photo: PhotoChoice };
   onSaveProfile: (draft: ProfileDraft) => Promise<void>;
   onSignOut: () => void;
 };
@@ -114,6 +132,7 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
     select,
     rejoin,
     editMessage,
+    editPost,
     editEvent,
     deleteMessage,
     react,
@@ -151,6 +170,9 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
     answerQuiz,
     setSaved,
     markUnread,
+    loadEditHistory,
+    setMemberRoles,
+    markAllRead,
   } = useChatContext();
   const [manage, setManage] = useState<ManageTarget>(null);
   const [adminOpen, setAdminOpen] = useState(false);
@@ -162,6 +184,7 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
   const blocked = useMemo(() => new Set(state.blocked), [state.blocked]);
   const saved = useMemo(() => new Set(state.saved), [state.saved]);
   const activeGroupEmoji = activeGroup?.emoji;
+  const activeGroupRoles = activeGroup?.roles;
   const activeEmoji = useMemo(
     () => (activeGroupEmoji?.length ? Object.fromEntries(activeGroupEmoji.map((e) => [e.name, e.url])) : undefined),
     [activeGroupEmoji],
@@ -169,20 +192,20 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
   // Inside the open group, names and photos come from members' group profiles.
   const groupUsers = useMemo(() => withGroupProfiles(state.users, activeMembers), [state.users, activeMembers]);
   const actions = useMemo<MessageActions>(() => {
-    const selfRole = roleOf(activeMembers, selfUser, activeIsDm);
+    const group = { kind: activeIsDm ? ("dm" as const) : undefined, roles: activeGroupRoles };
+    const selfStanding = memberStanding(activeMembers, selfUser, group);
     return {
       edit: editMessage,
+      editPost,
       editEvent,
       remove: deleteMessage,
       react,
       vote,
       pin,
       canRemove: (authorId) => {
-        if (!selfRole) return false;
-        const author = state.users[authorId];
         // Authors whose account is gone count as plain members, as on the server.
-        const authorRole = author ? (roleOf(activeMembers, author, activeIsDm) ?? "member") : "member";
-        return canManageMessages(selfRole, authorRole);
+        const author = memberStanding(activeMembers, state.users[authorId], group) ?? { role: "member" as const };
+        return mayActOn(selfStanding, author, "MESSAGE:MANAGE");
       },
       // Nobody moderates direct messages, so there's no one to report to there.
       ...(!activeIsDm && { report: reportMessage }),
@@ -194,8 +217,10 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
       isSaved: (id) => saved.has(id),
       markUnread,
       ...(activeEmoji && { emoji: activeEmoji }),
+      history: loadEditHistory,
     };
   }, [
+    loadEditHistory,
     rsvp,
     forwardMessage,
     answerQuiz,
@@ -204,6 +229,7 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
     markUnread,
     activeEmoji,
     editMessage,
+    editPost,
     editEvent,
     deleteMessage,
     react,
@@ -215,6 +241,7 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
     selfUser,
     state.users,
     activeIsDm,
+    activeGroupRoles,
   ]);
   const memberActions = useMemo<MemberActions>(
     () => ({
@@ -224,6 +251,7 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
       revokeInvite: (userId) => uninvite(activeGroupId, userId),
       loadInvites: () => loadInvites(activeGroupId),
       setRole: (userId, role) => setMemberRole(activeGroupId, userId, role),
+      setRoles: (userId, roles) => setMemberRoles(activeGroupId, userId, roles),
       mute: (userId, until) => muteMember(activeGroupId, userId, until),
       kick: (userId) => kickMember(activeGroupId, userId),
       ban: (userId, options) => banMember(activeGroupId, userId, options),
@@ -255,6 +283,7 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
       uninvite,
       loadInvites,
       setMemberRole,
+      setMemberRoles,
       muteMember,
       kickMember,
       banMember,
@@ -289,15 +318,30 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
   // Your saved messages; they share the side the same way.
   const [savedPanel, setSavedPanel] = useState(false);
   const [newDmOpen, setNewDmOpen] = useState(false);
+  // The quick switcher: Ctrl+K (⌘K) from anywhere opens it, and again closes it.
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!isSwitcherShortcut(event)) return;
+      event.preventDefault();
+      setSwitcherOpen((open) => !open);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // Desktop notifications for what the server says you'd want to hear about,
   // while you're not looking at the app (and not in Do not disturb).
-  /** Open a notified message: its thread, or its place in its channel. */
+  /** Open a notified or linked message: its thread (a forum post's own), or its place in its channel. */
   const goToMessage = useEffectEvent(({ subgroupId, messageId, threadId }: NotificationTarget) => {
+    // A link to a channel you can't see (or that's gone) opens nothing.
+    const channel = state.groups.flatMap((g) => g.subgroups).find((s) => s.id === subgroupId);
+    if (!channel) return;
     setDiscovering(false);
     leaveSettings();
     select(subgroupId);
-    if (threadId) setThread({ subgroupId, id: threadId });
+    const root = threadId ?? (channel.type === "forum" ? messageId : undefined);
+    if (root) setThread({ subgroupId, id: root });
     else if (messageId) pendingJump.current = { subgroupId, id: messageId };
   });
 
@@ -327,22 +371,14 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
     }
   });
 
-  // Push notifications clicked while the app was closed open it at "/?open=…"; while
-  // it's open, the service worker posts the same here instead.
+  // Message links, and push notifications clicked while the app was closed, open it at
+  // "/?open=…" (kept through signing in: see captureOpenLink); while it's open, the
+  // service worker posts clicked notifications here instead.
   useEffect(() => {
     if (!ready) return;
-    const url = new URL(window.location.href);
-    const subgroupId = url.searchParams.get("open");
-    if (subgroupId) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- once, when the connection is first ready (like the clicks below)
-      goToMessage({
-        subgroupId,
-        messageId: url.searchParams.get("message") ?? undefined,
-        threadId: url.searchParams.get("thread") ?? undefined,
-      });
-      for (const key of ["open", "message", "thread"]) url.searchParams.delete(key);
-      window.history.replaceState(window.history.state, "", url);
-    }
+    const target = takeOpenLink();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- once, when the connection is first ready (like the clicks below)
+    if (target) goToMessage(target);
     const worker = navigator.serviceWorker;
     if (!worker) return;
     const onMessage = (event: MessageEvent) => {
@@ -402,6 +438,83 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
     if (activeMessages.some((m) => m.id === target.id)) requestAnimationFrame(() => jumpTo(target.id));
   }, [activeId, activeMessages]);
 
+  // Keyboard shortcuts anywhere in the app (see lib/chat/shortcuts.ts; Ctrl+K is the quick switcher's own).
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const onShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (event.defaultPrevented || event.isComposing) return;
+    const action = shortcutFor({ ...pick(event), typing: isTyping(event.target) });
+    if (!action) return;
+    // While a dialog or menu is open, Escape is theirs.
+    const overlay = document.querySelector("dialog[open], [role='menu']");
+    if (overlay && (action === "close-panel" || action === "mark-all-read")) return;
+    const go = (subgroupId: string | undefined) => {
+      if (!subgroupId) return;
+      select(subgroupId);
+      setDiscovering(false);
+      leaveSettings();
+    };
+    switch (action) {
+      case "previous-channel":
+      case "next-channel":
+      case "previous-unread":
+      case "next-unread": {
+        const unread = action.endsWith("unread");
+        const direction = action.startsWith("next") ? 1 : -1;
+        // Next and previous follow what's on screen; unread ones are found anywhere.
+        const shown = [...document.querySelectorAll<HTMLElement>("[data-channel]")].map((row) => row.dataset.channel!);
+        const order = unread || shown.length === 0 ? sidebarOrderFrom(state.groups) : [...new Set(shown)];
+        go(stepChannel(order, state.activeId, direction, unread ? (id: string) => (state.unread[id] ?? 0) > 0 : undefined));
+        break;
+      }
+      case "mark-all-read":
+        void markAllRead();
+        break;
+      case "search":
+        setThread(null);
+        setBrowsing(null);
+        setSavedPanel(false);
+        setSearching(true);
+        leaveSettings();
+        setDiscovering(false);
+        break;
+      case "settings":
+        setSidebarOpen(false);
+        setUserSettings({});
+        break;
+      case "help":
+        setShortcutsOpen((open) => !open);
+        break;
+      case "close-panel":
+        if (!thread && !browsing && !searching && !savedPanel) return; // nothing to close: leave Escape alone
+        setThread(null);
+        setBrowsing(null);
+        setSearching(false);
+        setSavedPanel(false);
+        break;
+    }
+    event.preventDefault();
+  });
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => onShortcut(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
+  // "#channel" in messages links to the channels of that message's group you can see.
+  const channelLinks = useMemo<ChannelLinks>(
+    () => ({
+      channelsFor: (subgroupId) =>
+        state.groups.find((g) => g.subgroups.some((s) => s.id === subgroupId))?.subgroups.map((s) => ({ id: s.id, name: s.name })) ?? [],
+      open: (subgroupId) => {
+        select(subgroupId);
+        setDiscovering(false);
+        setGroupSettings(null);
+        setUserSettings(null);
+      },
+    }),
+    [state.groups, select],
+  );
+
   if (state.status === "error") {
     return (
       <Notice title="Couldn't join the chat" body={state.error ?? undefined}>
@@ -436,7 +549,9 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
   const signedIn = Boolean(account);
   // Your role in the open group decides announcements and pins (guests can't pin).
   const selfRole = group ? groupRole(group, self) : undefined;
-  const mayPin = signedIn && Boolean(group) && canPin(selfRole, Boolean(group && isDm(group)));
+  const selfStanding = group ? groupStanding(group, self) : undefined;
+  const mayPin =
+    signedIn && Boolean(group) && (group && isDm(group) ? canPin(selfRole, true) : allows(selfStanding, "MESSAGE:PIN"));
   const messages = subgroup && state.messages[subgroup.id];
   const members = group && state.members[group.id];
   // This chat's members who are online (their live presence, not the list's snapshot).
@@ -493,9 +608,10 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
   const openMessage = (message: Message) => {
     setDiscovering(false);
     if (message.subgroupId !== subgroup?.id) select(message.subgroupId);
-    // A thread takes the side; the browse panel comes back when it's closed.
-    if (message.threadId) {
-      setThread({ subgroupId: message.subgroupId, id: message.threadId });
+    // A thread takes the side; the browse panel comes back when it's closed. A forum's posts open as their thread.
+    const inForum = state.groups.some((g) => g.subgroups.some((s) => s.id === message.subgroupId && s.type === "forum"));
+    if (message.threadId || inForum) {
+      setThread({ subgroupId: message.subgroupId, id: message.threadId ?? message.id });
       return;
     }
     if (message.subgroupId === subgroup?.id) requestAnimationFrame(() => jumpTo(message.id));
@@ -503,211 +619,229 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
   };
 
   return (
-    <div className="flex h-dvh overflow-hidden text-foreground">
-      <GroupList
-        open={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        onSelect={(id) => {
-          select(id);
-          setDiscovering(false);
-          leaveSettings();
-          setSidebarOpen(false);
-        }}
-        discovering={showDiscover && !settingsGroup && !userSettings}
-        onDiscover={() => {
-          setDiscovering(true);
-          leaveSettings();
-          setSidebarOpen(false);
-        }}
-        onSignOut={onSignOut}
-        onEditProfile={() => openUserSettings("profile")}
-        onManage={(target) =>
-          target.kind === "settings" ? openGroupSettings(target.groupId, target.section) : setManage(target)
-        }
-        canCreateGroup={signedIn}
-        onOpenAdmin={self?.role === "admin" ? () => setAdminOpen(true) : undefined}
-        onNewDm={signedIn ? () => setNewDmOpen(true) : undefined}
-        onSetStatus={() => openUserSettings("status")}
-        onOpenSettings={() => openUserSettings()}
-      />
-      {userSettings ? (
-        <SettingsScreen
-          section={userSettings.section}
-          onSection={(section) => setUserSettings({ section })}
-          onClose={() => setUserSettings(null)}
-          onOpenSidebar={() => setSidebarOpen(true)}
-          signedIn={signedIn}
-          account={account}
-          onSaveProfile={async (draft) => {
-            await onSaveProfile(draft);
-            // Guests re-join automatically when their identity changes.
-            if (account) rejoin();
+    <ChannelLinksContext.Provider value={channelLinks}>
+      <div className="flex h-dvh overflow-hidden text-foreground">
+        <GroupList
+          open={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+          onSelect={(id) => {
+            select(id);
+            setDiscovering(false);
+            leaveSettings();
+            setSidebarOpen(false);
+          }}
+          discovering={showDiscover && !settingsGroup && !userSettings}
+          onDiscover={() => {
+            setDiscovering(true);
+            leaveSettings();
+            setSidebarOpen(false);
           }}
           onSignOut={onSignOut}
-        />
-      ) : settingsGroup ? (
-        <GroupSettings
-          key={settingsGroup.id}
-          group={settingsGroup}
-          subgroup={subgroup ?? settingsGroup.subgroups[0]}
-          signedIn={signedIn}
-          users={groupUsers}
-          actions={memberActions}
-          section={groupSettings?.section}
-          onSection={(section) => setGroupSettings({ groupId: settingsGroup.id, section })}
-          onClose={() => setGroupSettings(null)}
-          onDeleted={() => {
-            setGroupSettings(null);
-            setDiscovering(true);
-          }}
-          onLeft={() => setGroupSettings(null)}
-          onEditChannel={
-            canManageGroup(settingsGroup, self) && subgroup
-              ? () => setManage({ kind: "channel", groupId: settingsGroup.id, channel: subgroup })
-              : undefined
+          onEditProfile={() => openUserSettings("profile")}
+          onManage={(target) =>
+            target.kind === "settings" ? openGroupSettings(target.groupId, target.section) : setManage(target)
           }
-          onOpenSidebar={() => setSidebarOpen(true)}
+          canCreateGroup={signedIn}
+          onOpenAdmin={self?.role === "admin" ? () => setAdminOpen(true) : undefined}
+          onNewDm={signedIn ? () => setNewDmOpen(true) : undefined}
+          onSetStatus={() => openUserSettings("status")}
+          onOpenSettings={() => openUserSettings()}
+          onQuickSwitch={() => setSwitcherOpen(true)}
         />
-      ) : discovering || !group || !subgroup ? (
-        <Discover
-          onOpenGroup={(groupId) => {
-            const first = state.groups.find((g) => g.id === groupId)?.subgroups[0];
-            if (!first) return;
-            select(first.id);
-            setDiscovering(false);
-          }}
-          onOpenEvent={openMessage}
-          onOpenSidebar={() => setSidebarOpen(true)}
-        />
-      ) : (
-        <>
-          <Chat
-            group={group}
-            subgroup={subgroup}
-            users={groupUsers}
-            notice={
-              state.stopping === "restart"
-                ? "The server is restarting. You'll reconnect automatically in a moment."
-                : state.stopping === "shutdown"
-                  ? "An admin is shutting the server down."
-                  : state.settings.notice
-            }
-            typingNames={typingNames}
-            usersOpen={usersOpen && !threadId && !browseOpen && !searchOpen && !savedOpen}
-            onlineCount={onlineCount}
-            signedIn={signedIn}
-            canAnnounce={canAnnounce(selfRole, self)}
-            canPin={mayPin}
-            mutedUntil={mutedUntil}
-            openThreadId={threadId}
-            actions={actions}
+        {userSettings ? (
+          <SettingsScreen
+            section={userSettings.section}
+            onSection={(section) => setUserSettings({ section })}
+            onClose={() => setUserSettings(null)}
             onOpenSidebar={() => setSidebarOpen(true)}
-            onToggleUsers={() => {
-              // Same breakpoint as the panel's `lg:` classes (64rem).
-              if (!window.matchMedia("(min-width: 64rem)").matches) {
-                setMembersDrawer(true);
-                return;
+            signedIn={signedIn}
+            account={account}
+            onSaveProfile={async (draft) => {
+              await onSaveProfile(draft);
+              // Guests re-join automatically when their identity changes.
+              if (account) rejoin();
+            }}
+            onSignOut={onSignOut}
+          />
+        ) : settingsGroup ? (
+          <GroupSettings
+            key={settingsGroup.id}
+            group={settingsGroup}
+            subgroup={subgroup ?? settingsGroup.subgroups[0]}
+            signedIn={signedIn}
+            users={groupUsers}
+            actions={memberActions}
+            section={groupSettings?.section}
+            onSection={(section) => setGroupSettings({ groupId: settingsGroup.id, section })}
+            onClose={() => setGroupSettings(null)}
+            onDeleted={() => {
+              setGroupSettings(null);
+              setDiscovering(true);
+            }}
+            onLeft={() => setGroupSettings(null)}
+            onEditChannel={
+              canManageGroup(settingsGroup, self) && subgroup
+                ? () => setManage({ kind: "channel", groupId: settingsGroup.id, channel: subgroup })
+                : undefined
+            }
+            onOpenSidebar={() => setSidebarOpen(true)}
+          />
+        ) : discovering || !group || !subgroup ? (
+          <Discover
+            onOpenGroup={(groupId) => {
+              const first = state.groups.find((g) => g.id === groupId)?.subgroups[0];
+              if (!first) return;
+              select(first.id);
+              setDiscovering(false);
+            }}
+            onOpenEvent={openMessage}
+            onOpenChat={(subgroupId) => {
+              select(subgroupId);
+              setDiscovering(false);
+            }}
+            onOpenSidebar={() => setSidebarOpen(true)}
+          />
+        ) : (
+          <>
+            <Chat
+              group={group}
+              subgroup={subgroup}
+              users={groupUsers}
+              notice={
+                state.stopping === "restart"
+                  ? "The server is restarting. You'll reconnect automatically in a moment."
+                  : state.stopping === "shutdown"
+                    ? "An admin is shutting the server down."
+                    : state.settings.notice
               }
-              // Members, a thread, the browse panel, search and saved messages share the side: showing members closes the others.
-              if (threadId || browseOpen || searchOpen || savedOpen) {
+              typingNames={typingNames}
+              usersOpen={usersOpen && !threadId && !browseOpen && !searchOpen && !savedOpen}
+              onlineCount={onlineCount}
+              signedIn={signedIn}
+              canAnnounce={canAnnounce(selfRole, self) || allows(selfStanding, "MESSAGE:ANNOUNCE")}
+              canPin={mayPin}
+              mutedUntil={mutedUntil}
+              openThreadId={threadId}
+              actions={actions}
+              onOpenSidebar={() => setSidebarOpen(true)}
+              onToggleUsers={() => {
+                // Same breakpoint as the panel's `lg:` classes (64rem).
+                if (!window.matchMedia("(min-width: 64rem)").matches) {
+                  setMembersDrawer(true);
+                  return;
+                }
+                // Members, a thread, the browse panel, search and saved messages share the side: showing members closes the others.
+                if (threadId || browseOpen || searchOpen || savedOpen) {
+                  setThread(null);
+                  setBrowsing(null);
+                  setSearching(false);
+                  setSavedPanel(false);
+                  setUsersOpen(true);
+                } else {
+                  setUsersOpen((open) => !open);
+                }
+              }}
+              onOpenThread={(message) => setThread({ subgroupId: subgroup.id, id: message.id })}
+              browsing={browseOpen}
+              onBrowse={() => {
+                setThread(null);
+                setSearching(false);
+                setSavedPanel(false);
+                setBrowsing(browseOpen ? null : group.id);
+              }}
+              searching={searchOpen}
+              onSearch={() => {
+                setThread(null);
+                setBrowsing(null);
+                setSavedPanel(false);
+                setSearching(!searchOpen);
+              }}
+              savedOpen={savedOpen}
+              onSaved={() => {
                 setThread(null);
                 setBrowsing(null);
                 setSearching(false);
-                setSavedPanel(false);
-                setUsersOpen(true);
-              } else {
-                setUsersOpen((open) => !open);
+                setSavedPanel(!savedOpen);
+              }}
+              direct={direct}
+              notifyMenu={
+                <NotifyMenu
+                  dm={Boolean(direct)}
+                  channelName={subgroup.name}
+                  groupName={group.name}
+                  channelLevel={state.notifications[subgroup.id]}
+                  groupLevel={state.notifications[group.id]}
+                  effective={notificationLevel(state.notifications, group, subgroup.id)}
+                  onSetChannel={(level) => setNotificationLevel(subgroup.id, level, state.notifications[subgroup.id] ?? null)}
+                  onSetGroup={(level) => setNotificationLevel(group.id, level, state.notifications[group.id] ?? null)}
+                />
               }
-            }}
-            onOpenThread={(message) => setThread({ subgroupId: subgroup.id, id: message.id })}
-            browsing={browseOpen}
-            onBrowse={() => {
-              setThread(null);
-              setSearching(false);
-              setSavedPanel(false);
-              setBrowsing(browseOpen ? null : group.id);
-            }}
-            searching={searchOpen}
-            onSearch={() => {
-              setThread(null);
-              setBrowsing(null);
-              setSavedPanel(false);
-              setSearching(!searchOpen);
-            }}
-            savedOpen={savedOpen}
-            onSaved={() => {
-              setThread(null);
-              setBrowsing(null);
-              setSearching(false);
-              setSavedPanel(!savedOpen);
-            }}
-            direct={direct}
-            notifyMenu={
-              <NotifyMenu
-                dm={Boolean(direct)}
-                channelName={subgroup.name}
-                groupName={group.name}
-                channelLevel={state.notifications[subgroup.id]}
-                groupLevel={state.notifications[group.id]}
-                effective={notificationLevel(state.notifications, group, subgroup.id)}
-                onSetChannel={(level) => setNotificationLevel(subgroup.id, level, state.notifications[subgroup.id] ?? null)}
-                onSetGroup={(level) => setNotificationLevel(group.id, level, state.notifications[group.id] ?? null)}
+              onOpenSettings={() => openGroupSettings(group.id, "about")}
+              onJoin={group.role ? undefined : () => joinGroup(group.id)}
+            />
+            {threadId ? (
+              <Thread
+                key={threadId}
+                subgroup={subgroup}
+                rootId={threadId}
+                root={threadRoot}
+                users={groupUsers}
+                actions={actions}
+                signedIn={signedIn}
+                canPin={mayPin}
+                groupName={direct?.title ?? group.name}
+                place={direct?.title}
+                mutedUntil={mutedUntil}
+                onClose={() => setThread(null)}
               />
-            }
-            onOpenSettings={() => openGroupSettings(group.id, "about")}
-            onJoin={group.role ? undefined : () => joinGroup(group.id)}
-          />
-          {threadId ? (
-            <Thread
-              key={threadId}
-              subgroup={subgroup}
-              rootId={threadId}
-              root={threadRoot}
-              users={groupUsers}
-              actions={actions}
-              signedIn={signedIn}
-              canPin={mayPin}
-              groupName={direct?.title ?? group.name}
-              place={direct?.title}
-              mutedUntil={mutedUntil}
-              onClose={() => setThread(null)}
-            />
-          ) : browseOpen ? (
-            <Browse
-              key={group.id}
-              group={group}
-              activeId={subgroup.id}
-              users={groupUsers}
-              actions={actions}
-              onOpen={(message) => {
-                // On small screens the panel covers the chat; close it to show the message.
-                if (!message.threadId && !window.matchMedia("(min-width: 64rem)").matches) setBrowsing(null);
-                openMessage(message);
-              }}
-              onClose={() => setBrowsing(null)}
-            />
-          ) : searchOpen ? (
-            <Search
-              group={group}
-              subgroup={subgroup}
-              onOpen={(message) => {
-                // On small screens the panel covers the chat; close it to show the message.
-                if (!message.threadId && !window.matchMedia("(min-width: 64rem)").matches) setSearching(false);
-                openMessage(message);
-              }}
-              onClose={() => setSearching(false)}
-            />
-          ) : savedOpen ? (
-            <Saved
-              onOpen={(message) => {
-                // On small screens the panel covers the chat; close it to show the message.
-                if (!message.threadId && !window.matchMedia("(min-width: 64rem)").matches) setSavedPanel(false);
-                openMessage(message);
-              }}
-              onClose={() => setSavedPanel(false)}
-            />
-          ) : (
-            usersOpen && (
+            ) : browseOpen ? (
+              <Browse
+                key={group.id}
+                group={group}
+                activeId={subgroup.id}
+                users={groupUsers}
+                actions={actions}
+                onOpen={(message) => {
+                  // On small screens the panel covers the chat; close it to show the message.
+                  if (!message.threadId && !window.matchMedia("(min-width: 64rem)").matches) setBrowsing(null);
+                  openMessage(message);
+                }}
+                onClose={() => setBrowsing(null)}
+              />
+            ) : searchOpen ? (
+              <Search
+                group={group}
+                subgroup={subgroup}
+                onOpen={(message) => {
+                  // On small screens the panel covers the chat; close it to show the message.
+                  if (!message.threadId && !window.matchMedia("(min-width: 64rem)").matches) setSearching(false);
+                  openMessage(message);
+                }}
+                onClose={() => setSearching(false)}
+              />
+            ) : savedOpen ? (
+              <Saved
+                onOpen={(message) => {
+                  // On small screens the panel covers the chat; close it to show the message.
+                  if (!message.threadId && !window.matchMedia("(min-width: 64rem)").matches) setSavedPanel(false);
+                  openMessage(message);
+                }}
+                onClose={() => setSavedPanel(false)}
+              />
+            ) : (
+              usersOpen && (
+                <Users
+                  users={groupUsers}
+                  group={group}
+                  actions={memberActions}
+                  canUpload={signedIn}
+                  onMessage={signedIn ? (userId) => openDmWith([userId]) : undefined}
+                  onOpenSettings={(section) => openGroupSettings(group.id, section)}
+                  className="hidden lg:flex"
+                />
+              )
+            )}
+            {membersDrawer && (
               <Users
                 users={groupUsers}
                 group={group}
@@ -715,62 +849,63 @@ function ChatApp({ account, onSaveProfile, onSignOut }: ChatAppProps) {
                 canUpload={signedIn}
                 onMessage={signedIn ? (userId) => openDmWith([userId]) : undefined}
                 onOpenSettings={(section) => openGroupSettings(group.id, section)}
-                className="hidden lg:flex"
+                onClose={() => setMembersDrawer(false)}
+                className="lg:hidden"
               />
-            )
-          )}
-          {membersDrawer && (
-            <Users
-              users={groupUsers}
-              group={group}
-              actions={memberActions}
-              canUpload={signedIn}
-              onMessage={signedIn ? (userId) => openDmWith([userId]) : undefined}
-              onOpenSettings={(section) => openGroupSettings(group.id, section)}
-              onClose={() => setMembersDrawer(false)}
-              className="lg:hidden"
-            />
-          )}
-        </>
-      )}
-      <CallWindow />
-      <IncomingCall />
-      {inviteCode && ready && (
-        <InviteJoin
-          code={inviteCode}
-          onPreview={previewInvite}
-          onRedeem={redeemInvite}
-          onJoined={(subgroupId) => {
-            closeInvite();
-            if (!subgroupId) return;
+            )}
+          </>
+        )}
+        <CallWindow />
+        <IncomingCall />
+        {inviteCode && ready && (
+          <InviteJoin
+            code={inviteCode}
+            onPreview={previewInvite}
+            onRedeem={redeemInvite}
+            onJoined={(subgroupId) => {
+              closeInvite();
+              if (!subgroupId) return;
+              setDiscovering(false);
+              leaveSettings();
+              setSidebarOpen(false);
+              select(subgroupId);
+            }}
+            onClose={closeInvite}
+          />
+        )}
+        <Reminders
+          onOpen={(reminder) => {
+            select(reminder.subgroupId);
+            leaveSettings();
+            setDiscovering(false);
+            dismissReminder(reminder.messageId);
+          }}
+        />
+        {self?.role === "admin" && <AdminDialog open={adminOpen} onClose={() => setAdminOpen(false)} />}
+        <ManageDialog
+          target={manage}
+          onClose={() => setManage(null)}
+          onCreated={(channelId) => {
+            select(channelId);
+            setDiscovering(false);
+            setSidebarOpen(false);
+          }}
+        />
+        {signedIn && <NewDmDialog open={newDmOpen} onStart={openDmWith} onClose={() => setNewDmOpen(false)} />}
+        <QuickSwitcher
+          open={switcherOpen}
+          onClose={() => setSwitcherOpen(false)}
+          onSelect={(id) => {
+            select(id);
             setDiscovering(false);
             leaveSettings();
             setSidebarOpen(false);
-            select(subgroupId);
           }}
-          onClose={closeInvite}
+          onMessage={signedIn ? (userId) => openDmWith([userId]) : undefined}
         />
-      )}
-      <Reminders
-        onOpen={(reminder) => {
-          select(reminder.subgroupId);
-          leaveSettings();
-          setDiscovering(false);
-          dismissReminder(reminder.messageId);
-        }}
-      />
-      {self?.role === "admin" && <AdminDialog open={adminOpen} onClose={() => setAdminOpen(false)} />}
-      <ManageDialog
-        target={manage}
-        onClose={() => setManage(null)}
-        onCreated={(channelId) => {
-          select(channelId);
-          setDiscovering(false);
-          setSidebarOpen(false);
-        }}
-      />
-      {signedIn && <NewDmDialog open={newDmOpen} onStart={openDmWith} onClose={() => setNewDmOpen(false)} />}
-    </div>
+        <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      </div>
+    </ChannelLinksContext.Provider>
   );
 }
 
@@ -809,4 +944,19 @@ function Notice({ title, body, children }: { title: string; body?: string; child
       {children}
     </main>
   );
+}
+
+/** The key press's fields (a KeyboardEvent's are getters, which spreading doesn't copy). */
+function pick(event: KeyboardEvent) {
+  return { key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey };
+}
+
+/**
+ * Channels in the order the sidebar shows them (its rows carry data-channel),
+ * then any in collapsed sections, in group order, so "next unread" still finds them.
+ */
+function sidebarOrderFrom(groups: Group[]) {
+  const shown = [...document.querySelectorAll<HTMLElement>("[data-channel]")].map((row) => row.dataset.channel!);
+  const all = groups.filter((g) => g.role).flatMap((g) => g.subgroups.map((s) => s.id));
+  return [...new Set([...shown, ...all])];
 }

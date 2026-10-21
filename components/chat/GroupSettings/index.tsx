@@ -6,12 +6,16 @@ import {
   Bell,
   Bot,
   Flag,
+  FolderTree,
+  Hourglass,
   Info,
   OctagonX,
   ScrollText,
   Settings2,
   ShieldOff,
   Smile,
+  Tags,
+  Sticker,
   UserPlus,
   UserRound,
   type LucideIcon,
@@ -33,20 +37,25 @@ import {
   type GroupSettingsSection,
 } from "@/components/chat/Manage";
 import {
+  allows,
   canBan,
-  canInvite,
+  canEditGroup,
   canManageGroup,
-  canReviewReports,
-  canViewModerationLog,
+  canManageRoles,
   dmName,
   groupRole,
+  groupStanding,
   isDm,
   type Group,
   type Subgroup,
   type User,
 } from "@/lib/chat/types";
+import { COLLAPSED_SECTIONS, renameInPersistentSet } from "@/lib/chat/prefs";
 import { uploadFile } from "@/lib/chat/upload";
+import CategoriesSettings from "./Categories";
+import DisappearingSettings from "./Disappearing";
 import EmojiSettings from "./Emoji";
+import RolesSettings from "./Roles";
 
 type Section = {
   id: GroupSettingsSection;
@@ -63,6 +72,12 @@ const GROUPS: { heading: string; sections: Section[] }[] = [
     sections: [
       { id: "about", label: "About", description: "What this chat is, and who's in it.", icon: Info },
       { id: "notifications", label: "Notifications", description: "What you're notified about here.", icon: Bell },
+      {
+        id: "disappearing",
+        label: "Disappearing messages",
+        description: "Delete messages here for everyone once they're an hour, a day or a week old.",
+        icon: Hourglass,
+      },
       { id: "you", label: "You here", description: "Your role, your profile here, and leaving.", icon: UserRound },
     ],
   },
@@ -70,14 +85,17 @@ const GROUPS: { heading: string; sections: Section[] }[] = [
     heading: "Group",
     sections: [
       { id: "overview", label: "Overview", description: "Its name, description, color and who can see it.", icon: Settings2 },
+      { id: "categories", label: "Categories", description: "The sections the group's channels are sorted into in the sidebar.", icon: FolderTree },
       { id: "words", label: "Blocked words", description: "Words and phrases members' messages can't contain.", icon: ShieldOff },
       { id: "emoji", label: "Emoji", description: "Custom emoji members use as :name: in messages and reactions.", icon: Smile },
+      { id: "stickers", label: "Stickers", description: "The group's sticker pack: images members send on their own, shown big.", icon: Sticker },
       { id: "bots", label: "Bots", description: "Outside services that add slash commands here.", icon: Bot },
     ],
   },
   {
     heading: "People",
     sections: [
+      { id: "roles", label: "Roles", description: "Named, colored roles that give members extra permissions.", icon: Tags },
       { id: "invites", label: "Invites", description: "Links that let people join, and invitations by name.", icon: UserPlus },
       { id: "bans", label: "Bans", description: "Who's banned, why, and until when.", icon: Ban },
     ],
@@ -98,17 +116,23 @@ const GROUPS: { heading: string; sections: Section[] }[] = [
 /** The sections your role here lets you see (the server checks every action again). */
 export function visibleSections(group: Group, self: User | undefined): Set<GroupSettingsSection> {
   const role = groupRole(group, self);
+  const standing = groupStanding(group, self);
   const manage = canManageGroup(group, self);
   // Anyone looking at the chat can see what it is and choose its notifications.
   const allowed = new Set<GroupSettingsSection>(["about", "notifications"]);
   if (role) allowed.add("you");
+  // A direct message's timer is anyone's in it to set; a group's, its managers'.
+  if (role && (group.kind === "dm" || manage)) allowed.add("disappearing");
   // Nobody manages or moderates direct messages.
   if (group.kind === "dm" || !role) return allowed;
-  if (manage) ["overview", "words", "emoji", "bots"].forEach((s) => allowed.add(s as GroupSettingsSection));
-  if (canInvite(role)) allowed.add("invites");
+  // The group itself is for ranks; channels, emoji, stickers and bots also for custom roles that grant it.
+  if (canEditGroup(group, self)) ["overview", "words"].forEach((s) => allowed.add(s as GroupSettingsSection));
+  if (manage) ["categories", "emoji", "stickers", "bots"].forEach((s) => allowed.add(s as GroupSettingsSection));
+  if (canManageRoles(role)) allowed.add("roles");
+  if (allows(standing, "MEMBER:INVITE")) allowed.add("invites");
   if (canBan(role, "member")) allowed.add("bans");
-  if (canReviewReports(role)) allowed.add("reports");
-  if (canViewModerationLog(role)) allowed.add("log");
+  if (allows(standing, "MESSAGE:MANAGE")) allowed.add("reports");
+  if (allows(standing, "GROUP:AUDIT")) allowed.add("log");
   // Only the owner deletes a group (and app-wide admins, anywhere).
   if (group.role === "owner" || self?.role === "admin") allowed.add("danger");
   return allowed;
@@ -156,7 +180,20 @@ export default function GroupSettings({
   onEditChannel,
   onOpenSidebar,
 }: GroupSettingsProps) {
-  const { state, addEmoji, removeEmoji } = useChatContext();
+  const {
+    state,
+    addEmoji,
+    removeEmoji,
+    addSticker,
+    removeSticker,
+    saveRole,
+    deleteRole,
+    reorderRoles,
+    createCategory,
+    renameCategory,
+    deleteCategory,
+    moveCategory,
+  } = useChatContext();
   const self = state.users[state.selfId];
   const allowed = visibleSections(group, self);
   const groups = GROUPS.map((g) => ({ ...g, sections: g.sections.filter((s) => allowed.has(s.id)) })).filter(
@@ -187,11 +224,30 @@ export default function GroupSettings({
     case "notifications":
       content = <Notifications group={group} subgroup={subgroup} />;
       break;
+    case "disappearing":
+      content = <DisappearingSettings key={subgroup.id} subgroup={subgroup} dm={dm} />;
+      break;
     case "you":
       content = <You group={group} signedIn={signedIn} onLeft={onLeft} />;
       break;
     case "overview":
       content = <GroupOverview group={group} />;
+      break;
+    case "categories":
+      content = (
+        <CategoriesSettings
+          group={group}
+          onCreate={(name) => createCategory(group.id, name)}
+          onRename={async (from, to) => {
+            const failure = await renameCategory(group.id, from, to);
+            // A collapsed category stays collapsed under its new name.
+            if (!failure) renameInPersistentSet(COLLAPSED_SECTIONS, `${group.id}/${from}`, `${group.id}/${to}`);
+            return failure;
+          }}
+          onDelete={(name) => deleteCategory(group.id, name)}
+          onMove={(name, before) => moveCategory(group.id, name, before)}
+        />
+      );
       break;
     case "words":
       content = <BlockedWordsForm key={group.id} group={group} />;
@@ -206,8 +262,29 @@ export default function GroupSettings({
         />
       );
       break;
+    case "stickers":
+      content = (
+        <EmojiSettings
+          kind="sticker"
+          emoji={group.stickers ?? []}
+          onUpload={async (file) => (await uploadFile(file, () => {}).promise).url}
+          onAdd={(name, url) => addSticker(group.id, name, url)}
+          onRemove={(name) => removeSticker(group.id, name)}
+        />
+      );
+      break;
     case "bots":
       content = <BotManager key={group.id} groupId={group.id} heading={false} />;
+      break;
+    case "roles":
+      content = (
+        <RolesSettings
+          roles={group.roles ?? []}
+          onSave={(draft, id) => saveRole(group.id, draft, id)}
+          onDelete={(id) => deleteRole(group.id, id)}
+          onReorder={(order) => reorderRoles(group.id, order)}
+        />
+      );
       break;
     case "invites":
       content = (

@@ -4,8 +4,9 @@
 
 import "./env.ts";
 import webpush from "web-push";
+import { hideSpoilers } from "../chat/spoiler.ts";
 import type { Group, Message, NotificationLevel, NotifyReason, Subgroup } from "../chat/types";
-import { accessByMember, canAccess, findGroup, loadAccess, noAccess, socketsOf } from "./access.ts";
+import { accessByMember, canSeeChannel, findGroup, loadAccess, noAccess, socketsOf } from "./access.ts";
 import { db } from "./db.ts";
 import { connections, members, type MessageRow } from "./state.ts";
 
@@ -48,7 +49,11 @@ export function pushTitle(reason: NotifyReason, author: string, where: string, o
 
 /** A one-line summary of the message (pushes have no room for attachments). */
 export function pushBody(message: Message) {
-  if (message.text) return message.text.length > 200 ? `${message.text.slice(0, 199)}…` : message.text;
+  if (message.title) return message.title;
+  if (message.text) {
+    const text = hideSpoilers(message.text);
+    return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+  }
   for (const a of message.attachments ?? []) {
     switch (a.type) {
       case "image":
@@ -88,7 +93,7 @@ export async function pushOffline(message: Message, channel: Subgroup, group: Gr
   for (const [userId, reason] of offline) {
     // Not kept in the cache: they're not connected, and most of them won't be soon.
     const access = accessByMember.get(userId) ?? (await loadAccess(userId, false).catch(() => null));
-    if (!access || !canAccess(group, userId, access) || access.blocked.has(message.authorId)) continue;
+    if (!access || !canSeeChannel(channel, userId, access) || access.blocked.has(message.authorId)) continue;
     // "all" only counts in groups they're in.
     if (reason === "message" && !access.groups.has(group.id)) continue;
     if (members.get(userId)?.presence === "dnd") continue;
@@ -161,7 +166,7 @@ export function notifyAbout(message: Message, channel: Subgroup, context: { repl
   reasons.delete(message.authorId);
 
   for (const [userId, reason] of reasons) {
-    if (!connections.has(userId) || !canAccess(group, userId)) continue;
+    if (!connections.has(userId) || !canSeeChannel(channel, userId)) continue;
     if (accessByMember.get(userId)?.blocked.has(message.authorId)) continue;
     const level = levelFor(userId, channel);
     // "mentions" keeps what's addressed to you (mentions, replies, your threads).

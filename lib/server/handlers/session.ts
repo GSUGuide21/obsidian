@@ -4,12 +4,13 @@ import {
   accessByMember,
   accessOf,
   canAccess,
+  canSeeChannel,
   channelFor,
   findGroup,
-  groupRoom,
   isNotificationLevel,
   listedGroups,
   loadAccess,
+  roomFor,
   socketsOf,
   syncRooms,
 } from "../access.ts";
@@ -73,7 +74,7 @@ export function registerSessionHandlers(socket: ChatSocket) {
         poster_url: verified.posterUrl ?? null,
       };
     } else {
-      if (!settings.guestsAllowed) return ack({ error: "Guests can't join right now. Sign in with Google instead." });
+      if (!settings.guestsAllowed) return ack({ error: "Guests can't join right now. Sign in instead." });
       // Guests pick their own random id, so it's namespaced and can never
       // collide with (or impersonate) a signed-in account's id.
       const rawId = typeof payload?.userId === "string" ? payload.userId : "";
@@ -176,6 +177,7 @@ export function registerSessionHandlers(socket: ChatSocket) {
       mentions,
       notifications: Object.fromEntries(accessByMember.get(member.id)?.notifications ?? []),
       readReceipts: member.read_receipts,
+      discoverable: member.discoverable,
       gifs: Boolean(tenorKey),
       presence: member.presence,
       blocked: [...(accessByMember.get(member.id)?.blocked ?? [])],
@@ -184,8 +186,8 @@ export function registerSessionHandlers(socket: ChatSocket) {
     });
     // Ongoing calls they can see (and any ringing for them).
     for (const call of calls.values()) {
-      const group = findGroup(call.groupId);
-      if (group && canAccess(group, member.id)) socket.emit("call:update", call);
+      const channel = channels.get(call.subgroupId);
+      if (channel && canSeeChannel(channel, member.id)) socket.emit("call:update", call);
     }
   });
 
@@ -245,13 +247,19 @@ export function registerSessionHandlers(socket: ChatSocket) {
     const row = userId ? members.get(userId) : undefined;
     if (!userId || !row) return ack({ ok: false, error: "You're not signed in." });
     if (!canReact(userId)) return ack({ ok: false, error: "Slow down a little and try again." });
-    if (typeof payload?.readReceipts !== "boolean") return ack({ ok: false, error: "Pick a setting." });
-    const { error } = await db.from("profiles").update({ read_receipts: payload.readReceipts }).eq("member_id", userId);
+    const changes = {
+      ...(typeof payload?.readReceipts === "boolean" && { read_receipts: payload.readReceipts }),
+      ...(typeof payload?.discoverable === "boolean" && { discoverable: payload.discoverable }),
+    };
+    if (Object.keys(changes).length === 0) return ack({ ok: false, error: "Pick a setting." });
+    const { error } = await db.from("profiles").update(changes).eq("member_id", userId);
     if (error) {
       console.error("privacy update failed:", error.message);
       return ack({ ok: false, error: "Couldn't save the setting. Try again." });
     }
-    row.read_receipts = payload.readReceipts;
+    Object.assign(row, changes);
+    // Others' records say whether to list them (see User.unlisted).
+    if ("discoverable" in changes) publishUser(userId);
     ack({ ok: true });
   });
 
@@ -296,7 +304,7 @@ export function registerSessionHandlers(socket: ChatSocket) {
   socket.on("push:subscribe", async (payload, ack) => {
     if (typeof ack !== "function") return;
     const userId = socket.data.userId;
-    if (!userId || members.get(userId)?.kind !== "user") return ack({ ok: false, error: "Sign in with Google to get push notifications." });
+    if (!userId || members.get(userId)?.kind !== "user") return ack({ ok: false, error: "Sign in to get push notifications." });
     if (!pushEnabled) return ack({ ok: false, error: "Push notifications aren't set up on this server." });
     if (!canReact(userId)) return ack({ ok: false, error: "Slow down a little and try again." });
     const endpoint = url(payload?.endpoint);
@@ -362,7 +370,7 @@ export function registerSessionHandlers(socket: ChatSocket) {
     const subgroupId = payload?.subgroupId;
     const channel = channelFor(subgroupId, userId);
     if (!userId || !channel || !canType(userId)) return;
-    socket.to(groupRoom(channel.groupId)).emit("typing", { subgroupId: channel.id, userId, typing: payload.typing === true });
+    socket.to(roomFor(channel.id)).emit("typing", { subgroupId: channel.id, userId, typing: payload.typing === true });
   });
 
   socket.on("disconnect", () => {

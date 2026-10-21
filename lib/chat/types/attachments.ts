@@ -43,7 +43,18 @@ export type PollAttachment = {
   type: "poll";
   question: string;
   options: string[];
+  /** Members can pick more than one of the options. */
+  multiple?: true;
+  /** Multiple-choice polls: at most this many choices each (2 up to one fewer than the options); absent for any number. */
+  maxChoices?: number;
+  /** When voting ends (ms); absent: never. */
+  closesAt?: number;
 };
+
+/** Whether a poll or quiz has stopped taking votes or answers. */
+export function isClosed(attachment: { closesAt?: number }, now = Date.now()) {
+  return attachment.closesAt !== undefined && attachment.closesAt <= now;
+}
 
 export type QuizAttachment = {
   type: "quiz";
@@ -55,6 +66,8 @@ export type QuizAttachment = {
    * Message.quizAnswers), so nobody can read it off the message.
    */
   correctAnswer?: string;
+  /** When answering ends (ms), and the right answer is shown to everyone; absent: never. */
+  closesAt?: number;
 };
 
 export type Mention = {
@@ -162,6 +175,12 @@ export type ForwardAttachment = {
   at: number;
 };
 
+/**
+ * A sticker from the group's pack (see Group.stickers), sent on its own and
+ * shown big. The server only accepts ones in the pack of the chat it's sent in.
+ */
+export type StickerAttachment = { type: "sticker"; name: string; url: string };
+
 /** A GIF from search (see "gif:search"), sent as an image attachment. */
 export type GifResult = { id: string; url: string; preview: string; width: number; height: number; title: string };
 
@@ -178,7 +197,8 @@ export type Attachment =
   | Reply
   | LinkPreview
   | EventAttachment
-  | ExternalAttachment;
+  | ExternalAttachment
+  | StickerAttachment;
 
 /** A due reminder for an event attachment. */
 export type EventReminder = {

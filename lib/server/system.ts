@@ -14,9 +14,12 @@ import { channels, latest, type MessageRow } from "./state.ts";
 // author is who did it; `system` says what (see SystemEvent).
 // ---------------------------------------------------------------------------
 
-/** Where group-wide notices go: the first uncategorized text channel, else the first text channel, else the first. */
+/**
+ * Where group-wide notices go: the first uncategorized text channel, else the
+ * first text channel, else the first; never a private one (not everyone sees it).
+ */
 export function mainChannel(groupId: string) {
-  const list = findGroup(groupId)?.subgroups ?? [];
+  const list = (findGroup(groupId)?.subgroups ?? []).filter((s) => !s.access);
   const text = list.filter((s) => (s.type ?? "text") === "text");
   return (text.find((s) => !s.category) ?? text[0] ?? list[0])?.id;
 }

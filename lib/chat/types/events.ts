@@ -17,10 +17,10 @@ import type {
   Webhook,
 } from "./groups";
 import type { InstanceBan, ObsidianSettings } from "./instance";
-import type { CollectionPage, HistoryPage, LookupResult, MarkUnreadResult, Message, Pin, QuizAnswerResult, Reaction, SavedPage, ScheduledMessage, ScheduleResult, SearchPage, SendResult, ThreadPage, ThreadSummary, TypingEvent, WikiPage, WikiSaveResult } from "./messages";
+import type { CollectionPage, ForumPage, ForumQuery, HistoryPage, LookupResult, MarkUnreadResult, Message, MessageVersion, Pin, QuizAnswerResult, Reaction, SavedPage, ScheduledMessage, ScheduleResult, SearchHas, SearchPage, SendResult, ThreadPage, ThreadSummary, TypingEvent, WikiPage, WikiSaveResult } from "./messages";
 import type { ModerationLogPage, ReportsPage } from "./moderation";
 import type { MemberRole } from "./permissions";
-import type { Member, MemberProfile, Presence, User } from "./users";
+import type { Member, MemberProfile, PeoplePage, Presence, User } from "./users";
 
 export type Snapshot = {
   self: User;
@@ -45,6 +45,8 @@ export type Snapshot = {
   reports: Record<string, number>;
   /** Whether you share read receipts ("Seen by"); off hides yours and theirs. */
   readReceipts: boolean;
+  /** Whether Discover's People tab lists you. */
+  discoverable: boolean;
   /** GIF search is set up on this server. */
   gifs: boolean;
   /** The messages you saved for later (ids, most recent first; up to MAX_SAVED). */
@@ -67,8 +69,11 @@ export interface ServerToClientEvents {
   "message:update": (message: Message) => void;
   "message:reactions": (event: { subgroupId: string; messageId: string; reactions: Reaction[] }) => void;
   "poll:votes": (event: { subgroupId: string; messageId: string; pollVotes: Record<string, string[][]> }) => void;
-  /** A thread root's summary changed; `thread` is absent once it has no replies. */
-  "thread:summary": (event: { subgroupId: string; messageId: string; thread?: ThreadSummary }) => void;
+  /**
+   * A thread root's summary changed; `thread` is absent once it has no replies.
+   * In forums `root` is the post itself, so a post that wasn't loaded can rise to the top.
+   */
+  "thread:summary": (event: { subgroupId: string; messageId: string; thread?: ThreadSummary; root?: Message }) => void;
   /** `pinned` is absent once it's unpinned. */
   "message:pin": (event: { subgroupId: string; messageId: string; pinned?: Pin }) => void;
   "wiki:update": (page: WikiPage) => void;
@@ -109,6 +114,11 @@ export interface ServerToClientEvents {
   "read:update": (event: { subgroupId: string; userId: string; at: number }) => void;
   /** One of your scheduled messages in this channel was posted (or failed): refresh the list. */
   "schedule:update": (event: { subgroupId: string }) => void;
+  /**
+   * Disappearing messages: the channel's messages posted before `before` (ms)
+   * were deleted, with their threads. Drop them.
+   */
+  "messages:expired": (event: { subgroupId: string; before: number }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -159,7 +169,15 @@ export interface ClientToServerEvents {
   /** Your saved messages you can still read, most recently saved first; `before` continues after that message. */
   "saved:list": (payload: { before?: string }, ack: (page: SavedPage) => void) => void;
   /** Your privacy settings: read receipts ("Seen by") on or off, both ways. */
-  "privacy:set": (payload: { readReceipts: boolean }, ack: (result: ActionResult) => void) => void;
+  /** Your privacy settings; each left out stays as it is. */
+  "privacy:set": (payload: { readReceipts?: boolean; discoverable?: boolean }, ack: (result: ActionResult) => void) => void;
+  /**
+   * Signed-in people others can find (Discover's People tab): everyone with an
+   * account who hasn't turned it off, most recently around first, matching
+   * `query` by name. Leaves out you, guests, bots, banned people, and anyone
+   * either of you blocked. `offset` continues a previous page.
+   */
+  "people:list": (payload: { query?: string; offset?: number }, ack: (page: PeoplePage) => void) => void;
   /** Those who manage the group: its blocked words; `null` for everyone else. */
   "group:filter": (payload: { groupId: string }, ack: (words: string[] | null) => void) => void;
   /**
@@ -264,13 +282,22 @@ export interface ClientToServerEvents {
       text: string;
       attachments?: Attachment[];
       threadId?: string;
+      /** Required for a new post in a forum (not a reply in its thread); ignored elsewhere. */
+      title?: string;
+      /** A new forum post's tags (ids of the forum's tags, up to MAX_POST_TAGS); ignored elsewhere. */
+      tags?: string[];
       /** false: the sender removed the link's preview card while writing; the message gets none. */
       preview?: boolean;
     },
     ack: (result: SendResult) => void,
   ) => void;
+  /** A page of a forum's posts (see ForumPage); `cursor` continues from the previous page. */
+  "forum:posts": (
+    payload: ForumQuery & { subgroupId: string; cursor?: string },
+    ack: (page: ForumPage) => void,
+  ) => void;
   /** A thread's root and its latest replies. */
-  "thread:history": (payload: { rootId: string }, ack: (page: ThreadPage) => void) => void;
+  "thread:history":(payload: { rootId: string }, ack: (page: ThreadPage) => void) => void;
   /** Messages with events, polls, quizzes or media (see CollectionKind) across all of a group's channels. */
   "group:collection": (
     payload: { groupId: string; kind: CollectionKind },
@@ -305,7 +332,19 @@ export interface ClientToServerEvents {
    * messages. `before` (a message id) continues past a previous page.
    */
   search: (
-    payload: { query: string; subgroupId?: string; groupId?: string; before?: string },
+    payload: {
+      query: string;
+      subgroupId?: string;
+      groupId?: string;
+      before?: string;
+      /** Filters (see lib/chat/searchQuery.ts): sent by one of these people… */
+      authorIds?: string[];
+      /** …with an attachment of each kind ("link": a URL in the text)… */
+      has?: SearchHas[];
+      /** …sent at or after `since` and before `until` (ms). With a filter, `query` may be empty. */
+      since?: number;
+      until?: number;
+    },
     ack: (page: SearchPage) => void,
   ) => void;
   /**
@@ -364,6 +403,9 @@ export interface ClientToServerEvents {
   /** Those who manage the group: add a custom emoji (an uploaded image) as :name:. */
   "emoji:add": (payload: { groupId: string; name: string; url: string }, ack: (result: ActionResult) => void) => void;
   "emoji:remove": (payload: { groupId: string; name: string }, ack: (result: ActionResult) => void) => void;
+  /** Those who manage the group: add a sticker (an uploaded image) to its pack. */
+  "sticker:add": (payload: { groupId: string; name: string; url: string }, ack: (result: ActionResult) => void) => void;
+  "sticker:remove": (payload: { groupId: string; name: string }, ack: (result: ActionResult) => void) => void;
   /** Admins and up: make a custom role (without `id`) or change one. Everyone sees it with "groups:update". */
   "role:save": (payload: GroupRoleDraft & { groupId: string; id?: string }, ack: (result: ActionResult) => void) => void;
   /** Admins and up: delete a custom role; whoever held it loses it. */
@@ -396,15 +438,29 @@ export interface ClientToServerEvents {
     payload: { messageId: string; index: number; event: EventAttachment },
     ack: (result: ActionResult) => void,
   ) => void;
-  /** Authors only. Edits the text; attachments stay as they were. */
-  "message:edit": (payload: { id: string; text: string }, ack: (result: SendResult) => void) => void;
+  /**
+   * Authors only. Edits the text (and a forum post's `title` and `tags`);
+   * attachments stay as they were. The text it had is kept (see "message:history").
+   */
+  "message:edit": (payload: { id: string; text: string; title?: string; tags?: string[] }, ack: (result: SendResult) => void) => void;
+  /**
+   * Everyone who can read the message: every version of its text, oldest
+   * first, the current one last (only the newest MAX_EDIT_HISTORY earlier
+   * ones). `null` if it's gone.
+   */
+  "message:history": (payload: { id: string }, ack: (versions: MessageVersion[] | null) => void) => void;
   /** Authors, and moderators and up for messages of members ranked below them. */
   "message:delete": (payload: { id: string }, ack: (result: ActionResult) => void) => void;
   /** Adds the reaction, or removes it if this member already reacted with that emoji. */
   "reaction:toggle": (payload: { messageId: string; emoji: string }, ack: (result: ActionResult) => void) => void;
   /** `option: null` withdraws the vote. */
   "poll:vote": (
-    payload: { messageId: string; poll: number; option: number | null },
+    /**
+     * `option`: the one to vote for (`null` withdraws every vote). In a
+     * multiple-choice poll, `chosen: false` takes that option back instead,
+     * and the others stay as they are.
+     */
+    payload: { messageId: string; poll: number; option: number | null; chosen?: boolean },
     ack: (result: ActionResult) => void,
   ) => void;
   /** This member has read the subgroup up to (and including) `messageId`. */
@@ -419,6 +475,11 @@ export interface ClientToServerEvents {
   "group:delete": (payload: { id: string }, ack: (result: ActionResult) => void) => void;
   /** Those who manage the group. Without `id` it creates the channel in `groupId`. */
   "channel:save": (payload: ChannelDraft & { id?: string }, ack: (result: SaveResult) => void) => void;
+  /**
+   * Turn disappearing messages on (`after`: seconds, one of DISAPPEAR_TIMES) or
+   * off (0) in a channel: those who manage its group, or anyone in a direct message.
+   */
+  "channel:disappear": (payload: { subgroupId: string; after: number }, ack: (result: ActionResult) => void) => void;
   /** Those who manage the channel's group. Deletes the channel and all its messages. */
   "channel:delete": (payload: { id: string }, ack: (result: ActionResult) => void) => void;
   /** Your own sidebar order: `order` lists every group you're in. */
@@ -431,6 +492,17 @@ export interface ClientToServerEvents {
    */
   "channel:move": (
     payload: { id: string; groupId: string; category?: string; order: string[] },
+    ack: (result: ActionResult) => void,
+  ) => void;
+  /** Those who manage the group: make an empty category, at the end of its sidebar. */
+  "category:create": (payload: { groupId: string; name: string }, ack: (result: ActionResult) => void) => void;
+  /** Those who manage the group: rename a category (its channels go with it). */
+  "category:rename": (payload: { groupId: string; from: string; to: string }, ack: (result: ActionResult) => void) => void;
+  /** Those who manage the group: delete a category; its channels stay, uncategorized. */
+  "category:delete": (payload: { groupId: string; name: string }, ack: (result: ActionResult) => void) => void;
+  /** Those who manage the group: move a category, with its channels, before `before` (null: last). */
+  "category:move": (
+    payload: { groupId: string; name: string; before: string | null },
     ack: (result: ActionResult) => void,
   ) => void;
 }

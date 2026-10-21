@@ -3,7 +3,7 @@
 // path with their extension, and `import type` only from lib/chat/types.
 
 import { findBlockedWord } from "../chat/safety.ts";
-import type { Message, Subgroup } from "../chat/types";
+import type { Attachment, Message, Subgroup } from "../chat/types";
 import { accessOf, addMember, allowedIn, eitherBlocked, findGroup, mutedIn, roleIn, toChannel } from "./access.ts";
 import { discoverChanged, hasEvent } from "./discover.ts";
 import { mayAnnounce, refreshThread } from "./messages.ts";
@@ -40,7 +40,9 @@ export function slowModeError(channel: Subgroup, userId: string) {
 /**
  * Why `userId` can't post in the channel right now (undefined if they can):
  * muted, a one-on-one where either side blocked the other, top-level posts in
- * an announcement channel (`thread` replies are fine), or slow mode (unless
+ * an announcement channel (`thread` replies are fine), untitled top-level
+ * posts in a forum (`thread` is also true for a titled post, which starts
+ * one), or slow mode (unless
  * `slow` is false: scheduling, and sending what was scheduled). Shared by
  * sending, forwarding and scheduled sends, so they follow the same rules.
  */
@@ -59,6 +61,7 @@ export async function postingError(channel: Subgroup, userId: string, thread = f
   if (!thread && channel.type === "announcement" && !mayAnnounce(channel.groupId, userId)) {
     return "Only the group's owner and admins can post here. Reply in a thread instead.";
   }
+  if (!thread && channel.type === "forum") return "Posts in a forum need a title. Start a new post instead.";
   return slow ? slowModeError(channel, userId) : undefined;
 }
 
@@ -97,6 +100,15 @@ export async function afterPost(
     if (joinError) console.error("auto-join failed:", joinError.message);
   }
   if (message.threadId) await refreshThread(message.threadId, channel.id);
+}
+
+/** Why a sticker in these attachments can't be sent in the group: it isn't in the group's pack (anymore). */
+export function stickerError(groupId: string, attachments: readonly Attachment[]) {
+  const pack = findGroup(groupId)?.stickers ?? [];
+  const missing = attachments.some(
+    (a) => a.type === "sticker" && !pack.some((sticker) => sticker.name === a.name && sticker.url === a.url),
+  );
+  return missing ? "That sticker isn't in this group's pack." : undefined;
 }
 
 /** Why the word filter rejects this text, if it does. */

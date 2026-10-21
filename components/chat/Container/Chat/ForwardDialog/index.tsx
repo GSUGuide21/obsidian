@@ -27,13 +27,13 @@ export default function ForwardDialog({ preview, onForward, onClose }: ForwardDi
   const searchId = useId();
   const needle = query.trim().toLowerCase();
 
-  // Every chat you're in, by name ("Group › #channel", or who a DM is with); wikis have no chat to post in.
+  // Every chat you're in, by name ("Group › #channel", or who a DM is with); wikis have no chat to post in, and forums take titled posts.
   const targets = state.groups
     .filter((g) => g.role)
     .flatMap((group) =>
       isDm(group)
         ? group.subgroups.slice(0, 1).map((s) => ({ id: s.id, label: dmName(group, state.users, state.selfId), group, subgroup: s }))
-        : group.subgroups.filter((s) => s.type !== "wiki").map((s) => ({ id: s.id, label: `${group.name} › #${s.name}`, group, subgroup: s })),
+        : group.subgroups.filter((s) => s.type !== "wiki" && s.type !== "forum").map((s) => ({ id: s.id, label: `${group.name} › #${s.name}`, group, subgroup: s })),
     )
     .filter((t) => !needle || t.label.toLowerCase().includes(needle))
     .slice(0, 50);

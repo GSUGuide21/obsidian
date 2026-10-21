@@ -1,4 +1,4 @@
-// Groups and channels: loading them (with emoji, bots and custom roles), sending everyone the new list, and ordering.
+// Groups and channels: loading them (with emoji, stickers, bots and custom roles), sending everyone the new list, and ordering.
 // Loaded by Node's type stripping (see server.mts): imports from the app are by
 // path with their extension, and `import type` only from lib/chat/types.
 
@@ -28,16 +28,17 @@ import {
 
 /** (Re)load groups and channels: at startup and after an admin changes them. */
 export async function loadStructure() {
-  const [groupRows, channelRows, dmRows, emojiRows, botRows, roleRows] = await Promise.all([
-    db.from("groups").select("id, name, color, type, visibility, description, kind, blocked_words").order("position").order("created_at"),
-    db.from("channels").select("id, group_id, name, topic, type, category, slow_mode").order("position").order("created_at"),
+  const [groupRows, channelRows, dmRows, emojiRows, stickerRows, botRows, roleRows] = await Promise.all([
+    db.from("groups").select("id, name, color, type, visibility, description, kind, blocked_words, categories").order("position").order("created_at"),
+    db.from("channels").select("id, group_id, name, topic, type, category, slow_mode, disappear_after, forum_tags, private, allowed_roles, allowed_members").order("position").order("created_at"),
     // Who's in each direct message (its name is made from them).
     db.from("group_members").select("group_id, member_id, groups!inner(kind)").eq("groups.kind", "dm"),
     db.from("group_emoji").select("group_id, name, url").order("name"),
+    db.from("group_stickers").select("group_id, name, url").order("created_at"),
     db.from("group_bots").select(BOT_COLUMNS).order("created_at"),
     db.from("group_roles").select("id, group_id, name, color, permissions").order("position").order("created_at"),
   ]);
-  for (const result of [groupRows, channelRows, dmRows, emojiRows, botRows, roleRows]) {
+  for (const result of [groupRows, channelRows, dmRows, emojiRows, stickerRows, botRows, roleRows]) {
     if (result.error) throw new Error(`Couldn't load channels: ${result.error.message}`);
   }
   // Kept here only: members see a bot's name and commands, never its URL or secret.
@@ -56,6 +57,9 @@ export async function loadStructure() {
       type: row.type,
       ...(row.category && { category: row.category }),
       ...(row.slow_mode > 0 && { slowMode: row.slow_mode }),
+      ...(row.disappear_after && { disappearAfter: row.disappear_after }),
+      ...(row.type === "forum" && row.forum_tags?.length > 0 && { tags: row.forum_tags }),
+      ...(row.private && { access: { roles: row.allowed_roles ?? [], members: row.allowed_members ?? [] } }),
     });
   }
   // Kept here only: members never see a group's blocked words.
@@ -64,6 +68,10 @@ export async function loadStructure() {
   const emojiByGroup = new Map<string, { name: string; url: string }[]>();
   for (const row of emojiRows.data!) {
     emojiByGroup.set(row.group_id, [...(emojiByGroup.get(row.group_id) ?? []), { name: row.name, url: row.url }]);
+  }
+  const stickersByGroup = new Map<string, { name: string; url: string }[]>();
+  for (const row of stickerRows.data!) {
+    stickersByGroup.set(row.group_id, [...(stickersByGroup.get(row.group_id) ?? []), { name: row.name, url: row.url }]);
   }
   const rolesByGroup = new Map<string, GroupRole[]>();
   for (const row of roleRows.data!) {
@@ -77,8 +85,10 @@ export async function loadStructure() {
     type: row.type,
     visibility: row.visibility === "private" || row.kind === "dm" ? "private" : "public",
     ...(row.description && { description: row.description }),
+    ...(row.categories?.length > 0 && { categories: row.categories as string[] }),
     ...(row.kind === "dm" && { kind: "dm" as const, members: (dmMembers.get(row.id) ?? []).sort() }),
     ...(emojiByGroup.has(row.id) && { emoji: emojiByGroup.get(row.id) }),
+    ...(stickersByGroup.has(row.id) && { stickers: stickersByGroup.get(row.id) }),
     ...(rolesByGroup.has(row.id) && { roles: rolesByGroup.get(row.id) }),
     ...(botsByGroup.has(row.id) && {
       bots: botsByGroup.get(row.id)!.map((bot) => ({ id: bot.id, userId: botMemberId(bot.id), name: bot.name, commands: bot.commands })),

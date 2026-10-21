@@ -357,3 +357,23 @@ export function canEditGroup(group: Pick<Group, "role" | "kind">, self: Pick<Use
   if (group.kind === "dm") return false;
   return hasPermission(groupRole(group, self), "GROUP:EDIT");
 }
+
+/**
+ * Whether a private channel lets someone in who can read its group: its
+ * owner, admins and moderators (by rank, always), anyone a custom role lets
+ * manage channels, and the roles and members it names. App-wide admins are
+ * let in by the server before this. Public channels (no `access`) let in everyone.
+ */
+export function letsIn(
+  access: { roles: readonly string[]; members: readonly string[] } | undefined,
+  userId: string,
+  membership: { role: MemberRole; roles?: readonly string[] } | undefined,
+  groupRoles: readonly GroupRole[] | undefined,
+) {
+  if (!access) return true;
+  if (!membership) return false;
+  // Those who run the group see every channel in it.
+  if (membership.role !== "member") return true;
+  if (allows({ role: membership.role, granted: grantedBy(membership.roles, groupRoles) }, "GROUP:MANAGE")) return true;
+  return access.members.includes(userId) || (membership.roles ?? []).some((role) => access.roles.includes(role));
+}

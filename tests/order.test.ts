@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mainChannel, moveChannel, moveGroup, sections, stepChannel, visualOrder } from "../lib/chat/order.ts";
+import {
+  categoryOrder,
+  hasCategory,
+  mainChannel,
+  moveCategory,
+  moveChannel,
+  moveGroup,
+  sections,
+  stepCategory,
+  stepChannel,
+  visualOrder,
+} from "../lib/chat/order.ts";
 import type { Group, Subgroup } from "../lib/chat/types/groups.ts";
 
 const channel = (id: string, extra: Partial<Subgroup> = {}): Subgroup => ({
@@ -58,5 +69,43 @@ describe("moving groups", () => {
     const list = [{ id: "x" }, { id: "y" }, { id: "z" }] as Group[];
     assert.deepEqual(moveGroup(list, "z", "x"), ["z", "x", "y"]);
     assert.deepEqual(moveGroup(list, "x", null), ["y", "z", "x"]);
+  });
+});
+
+describe("categories", () => {
+  const withCategories = (subgroups: Subgroup[], categories: string[]): Group => ({ ...group(subgroups), categories });
+  const list = [channel("a", { category: "Games" }), channel("b"), channel("c", { category: "Work" }), channel("d", { category: "Games" })];
+
+  it("follows the stored order, empty ones included, then unlisted ones in use", () => {
+    const g = withCategories(list, ["Empty", "Work"]);
+    assert.deepEqual(categoryOrder(g), ["Empty", "Work", "Games"]);
+    assert.deepEqual(sections(g.subgroups, g.categories).categories.find(([name]) => name === "Empty"), ["Empty", []]);
+    assert.deepEqual(visualOrder(g.subgroups, g.categories).map((s) => s.id), ["b", "c", "a", "d"]);
+  });
+
+  it("matches names regardless of case", () => {
+    assert.ok(hasCategory(withCategories(list, []), "games"));
+    assert.ok(!hasCategory(withCategories(list, []), "Music"));
+  });
+
+  it("moves a category with its channels", () => {
+    const move = moveCategory(withCategories(list, []), "Work", "Games");
+    assert.deepEqual(move, { categories: ["Work", "Games"], order: ["b", "c", "a", "d"] });
+    assert.equal(moveCategory(withCategories(list, []), "Nope", null), null);
+  });
+
+  it("steps up and down, and not past either end", () => {
+    const g = withCategories(list, ["Games", "Work", "Empty"]);
+    assert.deepEqual(stepCategory(g, "Games", 1)?.categories, ["Work", "Games", "Empty"]);
+    assert.deepEqual(stepCategory(g, "Empty", -1)?.categories, ["Games", "Empty", "Work"]);
+    assert.equal(stepCategory(g, "Games", -1), null);
+    assert.equal(stepCategory(g, "Empty", 1), null);
+  });
+
+  it("drops a channel at the end of an empty category", () => {
+    const g = withCategories(list, ["Empty"]);
+    const move = moveChannel([g], "b", "g", "Empty", null);
+    assert.equal(move?.category, "Empty");
+    assert.equal(move?.order.at(-1), "b");
   });
 });

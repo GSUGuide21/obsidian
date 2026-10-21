@@ -113,7 +113,7 @@ function ProfileForm({ self, canUpload, profile, onSave, onClose }: Omit<GroupPr
               {upload ? `Uploading ${Math.round(upload.progress * 100)}%` : "Group photo"}
             </button>
           ) : (
-            <p className="text-xs text-muted">Sign in with Google to use a different photo here.</p>
+            <p className="text-xs text-muted">Sign in to use a different photo here.</p>
           )}
           {photo && !upload && (
             <button

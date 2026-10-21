@@ -27,3 +27,15 @@ export function fileName(value?: string) {
     return "File";
   }
 }
+
+/**
+ * A link that opens a message for anyone who can see it: its channel, and
+ * its thread when it's a reply (the same "?open=" link push notifications use).
+ */
+export function messageLink(origin: string, message: { id: string; subgroupId: string; threadId?: string }) {
+  const url = new URL("/", origin);
+  url.searchParams.set("open", message.subgroupId);
+  url.searchParams.set("message", message.id);
+  if (message.threadId) url.searchParams.set("thread", message.threadId);
+  return url.href;
+}

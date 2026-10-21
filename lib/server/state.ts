@@ -57,9 +57,11 @@ export type StatusRow = {
   status_expires_at: string | null;
   /** Whether "Seen by" includes them (and shows them others). */
   read_receipts: boolean;
+  /** Whether Discover's People tab lists them. */
+  discoverable: boolean;
 };
 
-export const STATUS_COLUMNS = "presence, status_text, status_emoji, status_expires_at, read_receipts";
+export const STATUS_COLUMNS = "presence, status_text, status_emoji, status_expires_at, read_receipts, discoverable";
 
 /** A `members` row joined with its profile (kept flat in memory). */
 export type MemberRow = ProfileRow & StatusRow & {
@@ -79,6 +81,7 @@ export function toStatusRow(raw: Partial<StatusRow> | null | undefined): StatusR
     status_emoji: raw?.status_emoji ?? null,
     status_expires_at: raw?.status_expires_at ?? null,
     read_receipts: raw?.read_receipts !== false,
+    discoverable: raw?.discoverable !== false,
   };
 }
 
@@ -126,6 +129,12 @@ export type MessageRow = {
   pinned_by: string | null;
   deleted_by: string | null;
   system: SystemEvent | null;
+  /** Forum posts only. */
+  title: string | null;
+  /** Forum posts only: tag ids. */
+  tags: string[] | null;
+  /** Generated: the later of created_at and thread_last_at. */
+  active_at: string;
 };
 
 export let groups: Group[] = [];

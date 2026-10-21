@@ -6,7 +6,10 @@ import type { User } from "./users";
 
 /** A channel as it was at the time. */
 export type ChannelSnapshot = Pick<Subgroup, "id" | "name" | "type"> &
-  Partial<Pick<Subgroup, "topic" | "category" | "slowMode">>;
+  Partial<Pick<Subgroup, "topic" | "category" | "slowMode" | "disappearAfter">> & {
+    /** A forum's tags, by name. */
+    tags?: string[];
+  };
 
 /** A group's settings as they were at the time. */
 export type GroupSnapshot = Pick<Group, "name" | "color"> &
@@ -57,6 +60,12 @@ export type ModerationRecord =
       from: { groupId: string; groupName: string; category?: string };
       to: { groupId: string; groupName: string; category?: string };
     }
+  /** Made an (empty) category. */
+  | { action: "category_create"; name: string }
+  /** Renamed a category, with the channels in it. */
+  | { action: "category_rename"; from: string; to: string }
+  /** Deleted a category; its `channelCount` channels stayed, uncategorized. */
+  | { action: "category_delete"; name: string; channelCount: number }
   /** Changed the group's name, color, visibility or description. */
   | { action: "group_update"; before: GroupSnapshot; after: GroupSnapshot }
   /** Made an invite link (see InviteLink). */
@@ -71,6 +80,8 @@ export type ModerationRecord =
   | { action: "bot_remove"; name: string; url: string }
   | { action: "emoji_add"; name: string; url: string }
   | { action: "emoji_remove"; name: string; url: string }
+  | { action: "sticker_add"; name: string; url: string }
+  | { action: "sticker_remove"; name: string; url: string }
   | { action: "role_create"; role: GroupRole }
   /** Changed a custom role's name, color or permissions. */
   | { action: "role_update"; before: GroupRole; after: GroupRole }

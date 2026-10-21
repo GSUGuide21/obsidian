@@ -2,9 +2,12 @@
 
 import { useState } from "react";
 import { CircleAlert, Plus, X } from "lucide-react";
+import Checkbox from "@/components/form/Checkbox";
+import DateTimeInput from "@/components/form/DateTime";
 import Field from "@/components/form/Field";
 import Input from "@/components/form/Input";
 import Radio from "@/components/form/Radio";
+import Select from "@/components/form/Select";
 import type { PollAttachment, QuizAttachment } from "@/lib/chat/types";
 
 const MAX_OPTIONS = 10;
@@ -18,11 +21,18 @@ export default function OptionsForm(props: OptionsFormProps) {
   const [question, setQuestion] = useState("");
   const [options, setOptions] = useState(["", ""]);
   const [correct, setCorrect] = useState<number | null>(null);
+  const [multiple, setMultiple] = useState(false);
+  /** Multiple-choice polls: at most this many choices; 0 for any number. */
+  const [maxChoices, setMaxChoices] = useState(0);
+  /** When voting or answering ends (ms); null for never. */
+  const [closesAt, setClosesAt] = useState<number | null>(null);
+  // The picker's earliest time: when the form opened (submitting checks it's still ahead).
+  const [openedAt] = useState(() => Date.now());
   // What's wrong, and which part it's about (shown there).
-  const [error, setError] = useState<{ field: "question" | "options"; message: string }>();
+  const [error, setError] = useState<{ field: "question" | "options" | "closes"; message: string }>();
 
   /** Show what's wrong where it is, and put the cursor there. */
-  function fail(field: "question" | "options", message: string, focusId: string) {
+  function fail(field: "question" | "options" | "closes", message: string, focusId: string) {
     setError({ field, message });
     document.getElementById(focusId)?.focus();
   }
@@ -37,12 +47,18 @@ export default function OptionsForm(props: OptionsFormProps) {
     if (new Set(list.map((o) => o.toLowerCase())).size !== list.length) {
       return fail("options", "Options must be different from each other.", "options-option-0");
     }
+    if (closesAt !== null && closesAt < Date.now() + 60_000) {
+      return fail("closes", "Pick a time at least a minute from now.", "options-closes");
+    }
+    const closes = closesAt !== null ? { closesAt } : {};
     if (props.quiz) {
       const answer = correct === null ? "" : filled[correct];
       if (!answer) return fail("options", "Mark the correct answer.", "options-option-0");
-      props.onSubmit({ type: "quiz", question: q, options: list, correctAnswer: answer });
+      props.onSubmit({ type: "quiz", question: q, options: list, correctAnswer: answer, ...closes });
     } else {
-      props.onSubmit({ type: "poll", question: q, options: list });
+      // A limit of "all of them" (or more) is no limit.
+      const max = multiple && maxChoices >= 2 && maxChoices < list.length ? { maxChoices } : {};
+      props.onSubmit({ type: "poll", question: q, options: list, ...(multiple && { multiple: true as const }), ...max, ...closes });
     }
   }
 
@@ -136,6 +152,41 @@ export default function OptionsForm(props: OptionsFormProps) {
           </p>
         )}
       </fieldset>
+      {!props.quiz && (
+        <Checkbox checked={multiple} onChange={setMultiple} description="Members can vote for more than one option.">
+          Allow more than one answer
+        </Checkbox>
+      )}
+      {!props.quiz && multiple && options.length > 2 && (
+        <Field label="How many each" htmlFor="options-max">
+          <Select
+            id="options-max"
+            value={String(maxChoices < options.length ? maxChoices : 0)}
+            onChange={(next) => setMaxChoices(Number(next ?? 0))}
+            options={[
+              { value: "0", label: "Any number" },
+              ...Array.from({ length: options.length - 2 }, (_, i) => ({ value: String(i + 2), label: `Up to ${i + 2}` })),
+            ]}
+          />
+        </Field>
+      )}
+      <Field
+        label={props.quiz ? "Stop taking answers" : "Close voting"}
+        htmlFor="options-closes"
+        optional
+        hint={props.quiz ? "The answer is shown to everyone once it closes." : "Leave empty to keep it open."}
+        error={error?.field === "closes" ? error.message : undefined}
+      >
+        <DateTimeInput
+          id="options-closes"
+          value={closesAt}
+          min={openedAt}
+          onChange={(next) => {
+            setClosesAt(next);
+            if (error?.field === "closes") setError(undefined);
+          }}
+        />
+      </Field>
       <FormActions onCancel={props.onCancel} label={props.quiz ? "Add quiz" : "Add poll"} />
     </form>
   );

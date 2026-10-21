@@ -122,7 +122,8 @@ export async function postAnswer(authorId: string, text: string, channel: Subgro
       author_id: authorId,
       body: text,
       attachments: [{ type: "reply", messageId: invoked.id }],
-      thread_id: invoked.threadId ?? null,
+      // A command that starts a forum post is answered in the post's thread.
+      thread_id: invoked.threadId ?? (channel.type === "forum" ? invoked.id : null),
     })
     .select("*").single();
   if (error || !data) {

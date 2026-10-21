@@ -16,7 +16,7 @@ type SelectContentProps = ListboxItemsProps & {
 };
 
 /**
- * A select's popup list, under (or over) its anchor and as wide as it. It's
+ * A select's popup list, under (or over) its anchor and at least as wide as it. It's
  * drawn at the page root (see useAnchoredPosition), so nothing clips it.
  * Focus never moves into it: the select points at the active option instead.
  */

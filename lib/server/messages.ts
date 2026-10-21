@@ -3,10 +3,11 @@
 // path with their extension, and `import type` only from lib/chat/types.
 
 import type { Attachment, Message, QuizAnswer, Reaction, ThreadSummary, WikiPage } from "../chat/types";
+import { isClosed } from "../chat/types/attachments.ts";
 import { canPin } from "../chat/types/permissions.ts";
 import { allowedIn, findGroup, roleIn, toChannel } from "./access.ts";
 import { db } from "./db.ts";
-import { latest, members, type MessageRow } from "./state.ts";
+import { channels, latest, members, type MessageRow } from "./state.ts";
 
 export function toThreadSummary(row: MessageRow): ThreadSummary | undefined {
   if (!row.thread_count || !row.thread_last_at) return undefined;
@@ -36,6 +37,8 @@ export function toMessage(row: MessageRow): Message {
   return {
     ...base,
     text: row.body,
+    ...(row.title && { title: row.title }),
+    ...(row.tags?.length && { tags: row.tags }),
     ...(row.system && { system: row.system }),
     ...(row.attachments?.length > 0 && { attachments: withoutAnswers(row.attachments) }),
     ...(row.edited_at && { editedAt: Date.parse(row.edited_at) }),
@@ -45,11 +48,15 @@ export function toMessage(row: MessageRow): Message {
 
 /**
  * Attachments as clients get them: quizzes without their answer (the server
- * grades answers; see "quiz:answer"). Everything sent to clients goes through this.
+ * grades answers; see "quiz:answer") until they close, when everyone may see
+ * it. Everything sent to clients goes through this.
  */
-export function withoutAnswers(attachments: Attachment[]): Attachment[] {
+export function withoutAnswers(attachments: Attachment[], now = Date.now()): Attachment[] {
   if (!attachments.some((a) => a.type === "quiz")) return attachments;
-  return attachments.map((a) => (a.type === "quiz" ? { type: "quiz", question: a.question, options: a.options } : a));
+  return attachments.map((a) => {
+    if (a.type !== "quiz" || isClosed(a, now)) return a;
+    return { type: "quiz", question: a.question, options: a.options, ...(a.closesAt && { closesAt: a.closesAt }) };
+  });
 }
 
 /** Top-level messages in announcement channels, by rank or a custom role (app-wide admins count as group admins; bots post anywhere). */
@@ -90,7 +97,14 @@ export async function refreshThread(rootId: string, channelId: string) {
     else delete updated.thread;
     latest.set(channelId, updated);
   }
-  toChannel(channelId).emit("thread:summary", { subgroupId: channelId, messageId: rootId, ...(thread && { thread }) });
+  // In a forum the post itself goes along, so lists that hadn't loaded it can show it rising to the top.
+  const post = channels.get(channelId)?.type === "forum" ? (await hydrate([toMessage(root as MessageRow)]))[0] : undefined;
+  toChannel(channelId).emit("thread:summary", {
+    subgroupId: channelId,
+    messageId: rootId,
+    ...(thread && { thread }),
+    ...(post && { root: post }),
+  });
 }
 
 export function toWikiPage(channelId: string, row: { body: string; version: number; updated_at: string; updated_by: string | null } | null): WikiPage {
@@ -179,13 +193,3 @@ export async function loadMessage(id: string) {
 export const EMOJI = /^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|‍|️)+$/u;
 
 export const MAX_REACTIONS_PER_MESSAGE = 20;
-
-// ---------------------------------------------------------------------------
-// Search: messages containing every word, as substrings (served by a trigram
-// index on `body`).
-// ---------------------------------------------------------------------------
-
-/** `%word%`, with LIKE's wildcards in the word matched literally. */
-export function likePattern(word: string) {
-  return `%${word.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
-}

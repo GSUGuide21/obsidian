@@ -2,8 +2,13 @@ import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import type { User } from "@/lib/chat/types";
+import { useChannelLinks } from "@/components/chat/Core/ChannelLinks";
+import { linkChannels } from "@/lib/chat/channelLinks";
+import { remarkSpoiler, SPOILER_PROPERTY } from "@/lib/chat/spoiler";
+import { FONT_PROPERTY, remarkStyledText, SIZE_PROPERTY, styleCss } from "@/lib/chat/styledText";
 import { safeUrl } from "@/lib/chat/url";
 import Mention from "../Attachment/Mention";
+import Spoiler from "./Spoiler";
 
 type MarkdownTextProps = {
   text: string;
@@ -15,10 +20,13 @@ type MarkdownTextProps = {
   variant?: "message" | "page";
   /** The group's custom emoji (name → image URL): ":name:" in the text shows the image. */
   emoji?: Record<string, string>;
+  /** Where the text is: "#name" links to that group's channels (see ChannelLinksContext). */
+  subgroupId?: string;
 };
 
 const MENTION_PREFIX = "mention:";
 const EMOJI_PREFIX = "emoji:";
+const CHANNEL_PREFIX = "channel:";
 
 /** Rewrite ":name:" for the group's custom emoji as links the `a` renderer turns into images. */
 function linkEmoji(text: string, emoji: Record<string, string> | undefined) {
@@ -47,9 +55,12 @@ function linkMentions(text: string, mentions: MarkdownTextProps["mentions"]) {
 /**
  * Message text as GitHub-flavoured Markdown. Raw HTML is never rendered,
  * links are limited to http(s), and images are dropped (use attachments).
- * Single newlines are kept as line breaks, as people expect in chat.
+ * Single newlines are kept as line breaks, as people expect in chat, and
+ * "||spoilers||" stay covered until clicked.
  */
-export default function MarkdownText({ text, mentions, users, selfId, variant = "message", emoji }: MarkdownTextProps) {
+export default function MarkdownText({ text, mentions, users, selfId, variant = "message", emoji, subgroupId }: MarkdownTextProps) {
+  const links = useChannelLinks();
+  const channels = links && subgroupId ? links.channelsFor(subgroupId) : [];
   // A message that's only custom emoji shows them bigger, as with emoji in most chat apps.
   const onlyEmoji = Boolean(emoji) && /^(\s*:[a-z0-9_]{2,32}:)+\s*$/.test(text) &&
     [...text.matchAll(/:([a-z0-9_]{2,32}):/g)].every(([, name]) => Object.hasOwn(emoji!, name));
@@ -69,6 +80,18 @@ export default function MarkdownText({ text, mentions, users, selfId, variant = 
           />
         );
       }
+      if (href?.startsWith(CHANNEL_PREFIX) && links) {
+        const channelId = decodeURIComponent(href.slice(CHANNEL_PREFIX.length));
+        return (
+          <button
+            type="button"
+            onClick={() => links.open(channelId)}
+            className="rounded bg-accent/15 px-1 font-medium text-accent-bright hover:bg-accent/25"
+          >
+            {children}
+          </button>
+        );
+      }
       if (href?.startsWith(MENTION_PREFIX)) {
         const userId = decodeURIComponent(href.slice(MENTION_PREFIX.length));
         return (
@@ -82,6 +105,16 @@ export default function MarkdownText({ text, mentions, users, selfId, variant = 
           {children}
         </a>
       );
+    },
+    // "||hidden||" (see lib/chat/spoiler.ts); other spans pass through.
+    // Pages' fonts and sizes (see lib/chat/styledText.ts), from the known lists only.
+    span: ({ node, children, ...props }) => {
+      const properties = node?.properties ?? {};
+      if (SPOILER_PROPERTY in properties) return <Spoiler>{children}</Spoiler>;
+      if (FONT_PROPERTY in properties || SIZE_PROPERTY in properties) {
+        return <span style={styleCss(properties[FONT_PROPERTY], properties[SIZE_PROPERTY])}>{children}</span>;
+      }
+      return <span {...props}>{children}</span>;
     },
     p: ({ children }) => <p className="leading-6 not-first:mt-1.5">{children}</p>,
     strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
@@ -141,15 +174,18 @@ export default function MarkdownText({ text, mentions, users, selfId, variant = 
 
   return (
     <Markdown
-      remarkPlugins={[remarkGfm, remarkBreaks]}
+      // Fonts and sizes are for pages; messages keep to the chat's own type.
+      remarkPlugins={variant === "page" ? [remarkGfm, remarkBreaks, remarkSpoiler, remarkStyledText] : [remarkGfm, remarkBreaks, remarkSpoiler]}
       components={components}
       disallowedElements={["img"]}
       unwrapDisallowed
       urlTransform={(url) =>
-        url.startsWith(MENTION_PREFIX) || url.startsWith(EMOJI_PREFIX) ? url : defaultUrlTransform(url)
+        url.startsWith(MENTION_PREFIX) || url.startsWith(EMOJI_PREFIX) || url.startsWith(CHANNEL_PREFIX)
+          ? url
+          : defaultUrlTransform(url)
       }
     >
-      {linkEmoji(linkMentions(text, mentions), emoji)}
+      {linkChannels(linkEmoji(linkMentions(text, mentions), emoji), channels, CHANNEL_PREFIX)}
     </Markdown>
   );
 }

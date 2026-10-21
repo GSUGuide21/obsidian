@@ -27,7 +27,10 @@ import {
   type GroupBan,
   type GroupDraft,
   type SaveResult,
+  type ForumPage,
+  type ForumQuery,
   type HistoryPage,
+  type PeoplePage,
   type InstanceBan,
   type Member,
   type MemberProfile,
@@ -119,6 +122,8 @@ export type ChatState = {
   readPositions: Record<string, Record<string, number>>;
   /** Whether you share read receipts ("Seen by"); off hides yours and theirs. */
   readReceipts: boolean;
+  /** Whether Discover's People tab lists you. */
+  discoverable: boolean;
   /** GIF search is set up on this server. */
   gifs: boolean;
   /** Bumped when one of your scheduled messages in a channel was sent or failed (lists refetch on change). */
@@ -143,7 +148,10 @@ type Action =
   | { type: "message"; message: ChatMessage; replaces?: string }
   | { type: "failed"; subgroupId: string; threadId?: string; id: string; error?: string }
   | { type: "thread"; rootId: string; page: ThreadPage }
-  | { type: "summary"; subgroupId: string; messageId: string; thread?: ThreadSummary }
+  /** `root`: the post itself, in forums (added if it wasn't loaded). */
+  | { type: "summary"; subgroupId: string; messageId: string; thread?: ThreadSummary; root?: Message }
+  /** A page of a forum's posts, merged with the ones loaded (see loadPosts). */
+  | { type: "posts"; subgroupId: string; page: ForumPage }
   | { type: "pinned"; subgroupId: string; messageId: string; pinned?: Message["pinned"] }
   | { type: "pins"; subgroupId: string; messages: Message[]; users: User[] }
   | { type: "wiki"; page: WikiPage }
@@ -169,12 +177,17 @@ type Action =
   | { type: "readPositions"; subgroupId: string; positions: Record<string, number> }
   | { type: "readUpdate"; subgroupId: string; userId: string; at: number }
   | { type: "readReceipts"; on: boolean }
+  | { type: "discoverable"; on: boolean }
+  /** People found (e.g. on Discover): known from now on, so they can be messaged. */
+  | { type: "people"; users: User[] }
   | { type: "scheduled"; subgroupId: string }
   /** Everything in `groupId` (or in all your groups, without it) was marked read at `at`. */
   | { type: "markedRead"; groupId?: string; at: number }
   /** The channel was marked unread: read up to `lastRead`, with `unread` messages after it. */
   | { type: "markedUnread"; subgroupId: string; lastRead: number; unread: number }
   | { type: "saved"; messageId: string; saved: boolean }
+  /** Disappearing messages: the channel's messages from before `before` were deleted. */
+  | { type: "expired"; subgroupId: string; before: number }
   | { type: "quizAnswer"; subgroupId: string; messageId: string; quiz: number; answer: QuizAnswer };
 
 const ACK_TIMEOUT = 10_000;
@@ -217,6 +230,7 @@ function init(selfId: string): ChatState {
     reports: {},
     readPositions: {},
     readReceipts: true,
+    discoverable: true,
     gifs: false,
     scheduledVersion: {},
     saved: [],
@@ -395,6 +409,7 @@ function apply(state: ChatState, action: Action): ChatState {
         blocked: snapshot.blocked ?? [],
         reports: snapshot.reports ?? {},
         readReceipts: snapshot.readReceipts ?? true,
+        discoverable: snapshot.discoverable ?? true,
         gifs: snapshot.gifs ?? false,
         saved: snapshot.saved ?? [],
         lastRead: snapshot.lastRead,
@@ -503,6 +518,12 @@ function apply(state: ChatState, action: Action): ChatState {
         ...state,
         scheduledVersion: { ...state.scheduledVersion, [action.subgroupId]: (state.scheduledVersion[action.subgroupId] ?? 0) + 1 },
       };
+
+    case "discoverable":
+      return { ...state, discoverable: action.on };
+
+    case "people":
+      return { ...state, users: mergeUsers(state.users, action.users) };
 
     case "readReceipts":
       // Off: what you'd seen of others' reads goes too (it works both ways).
@@ -657,13 +678,27 @@ function apply(state: ChatState, action: Action): ChatState {
       };
     }
 
-    case "summary":
+    case "summary": {
+      const loaded = state.messages[action.subgroupId];
+      if (action.root && loaded && !loaded.some((m) => m.id === action.messageId)) {
+        return { ...state, messages: { ...state.messages, [action.subgroupId]: mergePage(loaded, [action.root]) } };
+      }
       return patchMessage(state, action.subgroupId, action.messageId, (m) => {
         const next = { ...m };
         if (action.thread) next.thread = action.thread;
         else delete next.thread;
         return next;
       });
+    }
+
+    case "posts": {
+      const { subgroupId, page } = action;
+      return {
+        ...state,
+        users: mergeUsers(state.users, page.users),
+        messages: { ...state.messages, [subgroupId]: mergePage(state.messages[subgroupId] ?? [], page.messages) },
+      };
+    }
 
     case "pinned": {
       const patched = patchMessage(state, action.subgroupId, action.messageId, (m) => {
@@ -776,6 +811,48 @@ function apply(state: ChatState, action: Action): ChatState {
         ...state,
         typing: setTyper(state.typing, action.subgroupId, action.userId, action.typing),
       };
+
+    case "expired": {
+      // Disappearing messages: everything the server had in the channel from before `before`
+      // (yours still sending are newer, and were never there), except roots whose threads
+      // still have younger replies: the server keeps those, wiped, until the replies go.
+      const gone = (m: ChatMessage) =>
+        !m.status &&
+        m.subgroupId === action.subgroupId &&
+        m.createdAt < action.before &&
+        !(m.thread && m.thread.lastAt >= action.before);
+      const keep = <M extends ChatMessage>(list: M[]) => (list.some(gone) ? list.filter((m) => !gone(m)) : list);
+      const loaded = state.messages[action.subgroupId];
+      const messages = loaded ? { ...state.messages, [action.subgroupId]: keep(loaded) } : state.messages;
+      const references = { ...state.references };
+      for (const [id, message] of Object.entries(references)) if (message && gone(message)) references[id] = null;
+      // A thread goes with its root.
+      const isGoneRoot = (rootId: string) => {
+        const root = loaded?.find((m) => m.id === rootId) ?? state.references[rootId];
+        return Boolean(root && gone(root));
+      };
+      const threads = Object.fromEntries(
+        Object.entries(state.threads).filter(([rootId]) => !isGoneRoot(rootId)).map(([rootId, replies]) => [rootId, keep(replies)]),
+      );
+      const latest = { ...state.latest };
+      if (latest[action.subgroupId] && gone(latest[action.subgroupId])) {
+        const newest = messages[action.subgroupId]?.findLast((m) => !m.status);
+        if (newest) latest[action.subgroupId] = newest;
+        else delete latest[action.subgroupId];
+      }
+      const pins = state.pins[action.subgroupId];
+      return {
+        ...state,
+        messages,
+        references,
+        threads,
+        latest,
+        pins: pins ? { ...state.pins, [action.subgroupId]: keep(pins) } : state.pins,
+        collections: Object.fromEntries(
+          Object.entries(state.collections).map(([key, list]) => [key, { ...list, messages: keep(list.messages) }]),
+        ),
+      };
+    }
   }
 }
 
@@ -869,8 +946,8 @@ export function useChat(identity: ChatIdentity) {
     socket.on("poll:votes", ({ subgroupId, messageId, pollVotes }) =>
       dispatch({ type: "patch", subgroupId, messageId, patch: { pollVotes } }),
     );
-    socket.on("thread:summary", ({ subgroupId, messageId, thread }) =>
-      dispatch({ type: "summary", subgroupId, messageId, thread }),
+    socket.on("thread:summary", ({ subgroupId, messageId, thread, root }) =>
+      dispatch({ type: "summary", subgroupId, messageId, thread, root }),
     );
     socket.on("message:pin", ({ subgroupId, messageId, pinned }) =>
       dispatch({ type: "pinned", subgroupId, messageId, pinned }),
@@ -896,6 +973,7 @@ export function useChat(identity: ChatIdentity) {
     socket.on("report:count", ({ groupId, open }) => dispatch({ type: "reports", groupId, open }));
     socket.on("read:update", ({ subgroupId, userId, at }) => dispatch({ type: "readUpdate", subgroupId, userId, at }));
     socket.on("schedule:update", ({ subgroupId }) => dispatch({ type: "scheduled", subgroupId }));
+    socket.on("messages:expired", ({ subgroupId, before }) => dispatch({ type: "expired", subgroupId, before }));
     socket.on("typing", ({ subgroupId, userId, typing }) => {
       const key = `${subgroupId}:${userId}`;
       clearTimeout(typingTimers.get(key));
@@ -923,14 +1001,33 @@ export function useChat(identity: ChatIdentity) {
   }, [identity.id]);
 
   // Load history for the open channel, and reload it after every reconnect.
+  // Forums load their own pages, in their order (see loadPosts).
+  const activeIsForum = state.groups.some((g) => g.subgroups.some((s) => s.id === state.activeId && s.type === "forum"));
   useEffect(() => {
     const socket = socketRef.current;
-    if (state.status !== "ready" || !state.activeId || !socket) return;
+    if (state.status !== "ready" || !state.activeId || !socket || activeIsForum) return;
     const subgroupId = state.activeId;
     socket.timeout(ACK_TIMEOUT).emit("history", { subgroupId }, (err, page) => {
       if (!err && isHistoryPage(page)) dispatch({ type: "history", subgroupId, page, older: false });
     });
-  }, [state.status, state.activeId]);
+  }, [state.status, state.activeId, activeIsForum]);
+
+  /**
+   * A page of a forum's posts (the first, or the one after `cursor`), merged
+   * into the channel's messages so they get live updates. Resolves to the
+   * page, or undefined if it couldn't be loaded.
+   */
+  const loadPosts = useCallback((subgroupId: string, query: ForumQuery, cursor?: string) => {
+    const socket = socketRef.current;
+    if (!socket?.connected) return Promise.resolve(undefined);
+    return new Promise<ForumPage | undefined>((resolve) => {
+      socket.timeout(ACK_TIMEOUT).emit("forum:posts", { subgroupId, ...query, ...(cursor && { cursor }) }, (err, page) => {
+        if (err || !isHistoryPage(page)) return resolve(undefined);
+        dispatch({ type: "posts", subgroupId, page });
+        resolve(page);
+      });
+    });
+  }, []);
 
   // Load the open channel's group members (for roles and moderation), and
   // reload them after every reconnect.
@@ -958,12 +1055,21 @@ export function useChat(identity: ChatIdentity) {
 
   const deliver = useCallback((message: ChatMessage) => {
     const socket = socketRef.current;
-    const { id, subgroupId, text, attachments, threadId, noPreview } = message;
+    const { id, subgroupId, text, attachments, threadId, title, tags, noPreview } = message;
     if (!socket?.connected) {
       dispatch({ type: "failed", subgroupId, threadId, id });
       return;
     }
-    const payload = { id, subgroupId, text, attachments, ...(threadId && { threadId }), ...(noPreview && { preview: false }) };
+    const payload = {
+      id,
+      subgroupId,
+      text,
+      attachments,
+      ...(threadId && { threadId }),
+      ...(title && { title }),
+      ...(tags && { tags }),
+      ...(noPreview && { preview: false }),
+    };
     socket.timeout(ACK_TIMEOUT).emit("message:send", payload, (err, result) => {
       if (err) dispatch({ type: "failed", subgroupId, threadId, id });
       else if (!result.ok) dispatch({ type: "failed", subgroupId, threadId, id, error: result.error });
@@ -978,8 +1084,11 @@ export function useChat(identity: ChatIdentity) {
       text: string,
       attachments: Attachment[] = [],
       threadId?: string,
-      /** `preview: false`: no card for its link (removed while writing it). */
-      options: { preview?: boolean } = {},
+      /**
+       * `preview: false`: no card for its link (removed while writing it).
+       * `title` and `tags`: a new post in a forum.
+       */
+      options: { preview?: boolean; title?: string; tags?: string[] } = {},
     ) => {
       const message: ChatMessage = {
         id: createId(),
@@ -988,6 +1097,8 @@ export function useChat(identity: ChatIdentity) {
         text,
         createdAt: Date.now(),
         status: "sending",
+        ...(options.title && { title: options.title }),
+        ...(options.tags?.length && { tags: options.tags }),
         ...(attachments.length > 0 && { attachments }),
         ...(threadId && { threadId }),
         ...(options.preview === false && { noPreview: true as const }),
@@ -1161,6 +1272,9 @@ export function useChat(identity: ChatIdentity) {
         | "bot:remove"
         | "emoji:add"
         | "emoji:remove"
+        | "sticker:add"
+        | "sticker:remove"
+        | "channel:disappear"
         | "account:delete"
         | "message:delete"
         | "reaction:toggle"
@@ -1175,6 +1289,10 @@ export function useChat(identity: ChatIdentity) {
         | "channel:delete"
         | "groups:reorder"
         | "channel:move"
+        | "category:create"
+        | "category:rename"
+        | "category:delete"
+        | "category:move"
         | "member:join"
         | "member:leave"
         | "member:invite"
@@ -1215,6 +1333,11 @@ export function useChat(identity: ChatIdentity) {
     (id: string, text: string) => request("message:edit", { id, text }),
     [request],
   );
+  /** Retitle or retag a forum post (yours); `text` is its current text, unchanged. */
+  const editPost = useCallback(
+    (id: string, text: string, post: { title: string; tags: string[] }) => request("message:edit", { id, text, ...post }),
+    [request],
+  );
   /** Replace the event at `index` in the message (edit, cancel or restore it). */
   const editEvent = useCallback(
     (messageId: string, index: number, event: EventAttachment) => request("event:update", { messageId, index, event }),
@@ -1226,7 +1349,8 @@ export function useChat(identity: ChatIdentity) {
     [request],
   );
   const vote = useCallback(
-    (messageId: string, poll: number, option: number | null) => request("poll:vote", { messageId, poll, option }),
+    (messageId: string, poll: number, option: number | null, chosen?: boolean) =>
+      request("poll:vote", { messageId, poll, option, ...(chosen === false && { chosen }) }),
     [request],
   );
   const pin = useCallback((id: string, pinned: boolean) => request("message:pin", { id, pinned }), [request]);
@@ -1234,6 +1358,17 @@ export function useChat(identity: ChatIdentity) {
   const deleteChannel = useCallback((id: string) => request("channel:delete", { id }), [request]);
   const reorderGroups = useCallback((order: string[]) => request("groups:reorder", { order }), [request]);
   const moveChannel = useCallback((move: ChannelMove) => request("channel:move", move), [request]);
+  const createCategory = useCallback((groupId: string, name: string) => request("category:create", { groupId, name }), [request]);
+  const renameCategory = useCallback(
+    (groupId: string, from: string, to: string) => request("category:rename", { groupId, from, to }),
+    [request],
+  );
+  const deleteCategory = useCallback((groupId: string, name: string) => request("category:delete", { groupId, name }), [request]);
+  /** Move category `name`, with its channels, before `before` (null: last). */
+  const moveCategory = useCallback(
+    (groupId: string, name: string, before: string | null) => request("category:move", { groupId, name, before }),
+    [request],
+  );
 
   // Group membership and moderation. The server broadcasts member and group
   // list changes to everyone affected, so these only report failures too.
@@ -1330,7 +1465,8 @@ export function useChat(identity: ChatIdentity) {
         | "link:preview"
         | "read:unmark"
         | "quiz:answer"
-        | "saved:list",
+        | "saved:list"
+        | "message:history",
     >(
       event: E,
       payload: Parameters<ClientToServerEvents[E]>[0],
@@ -1427,6 +1563,22 @@ export function useChat(identity: ChatIdentity) {
   );
   const removeEmoji = useCallback((groupId: string, name: string) => request("emoji:remove", { groupId, name }), [request]);
 
+  // Sticker packs (those who manage the group), the same way.
+  const addSticker = useCallback(
+    (groupId: string, name: string, url: string) => request("sticker:add", { groupId, name, url }),
+    [request],
+  );
+  const removeSticker = useCallback((groupId: string, name: string) => request("sticker:remove", { groupId, name }), [request]);
+
+  /** Disappearing messages in a channel: `after` seconds (one of DISAPPEAR_TIMES), or 0 for off. Arrives with "groups:update". */
+  const setDisappearing = useCallback(
+    (subgroupId: string, after: number) => request("channel:disappear", { subgroupId, after }),
+    [request],
+  );
+
+  /** Every version of a message's text, oldest first (the current one last); `undefined` if it couldn't be loaded. */
+  const loadEditHistory = useCallback(async (id: string) => (await ask("message:history", { id })) ?? undefined, [ask]);
+
   // Custom roles (admins and up; the server checks). The new roles arrive with "groups:update",
   // and who holds them with "member:update".
   /** Make a custom role (no `id`) or change one. */
@@ -1459,6 +1611,31 @@ export function useChat(identity: ChatIdentity) {
       return failure;
     },
     [request],
+  );
+
+  /** Be listed on Discover's People tab, or not. Resolves to an error message. */
+  const setDiscoverable = useCallback(
+    async (on: boolean) => {
+      const failure = await request("privacy:set", { discoverable: on });
+      if (!failure) dispatch({ type: "discoverable", on });
+      return failure;
+    },
+    [request],
+  );
+
+  /** A page of people you can find (see "people:list"); undefined if it couldn't be loaded. */
+  const findPeople = useCallback(
+    (query: string, offset = 0) =>
+      new Promise<PeoplePage | undefined>((resolve) => {
+        const socket = socketRef.current;
+        if (!socket?.connected) return resolve(undefined);
+        socket.timeout(ACK_TIMEOUT).emit("people:list", { query, offset }, (err, page) => {
+          if (err || !Array.isArray(page?.users)) return resolve(undefined);
+          dispatch({ type: "people", users: page.users });
+          resolve(page);
+        });
+      }),
+    [],
   );
 
   /** Answer the quiz at `quiz` in a message; the server grades it and your answer shows. */
@@ -1689,6 +1866,8 @@ export function useChat(identity: ChatIdentity) {
     rejoin,
     loadOlder,
     editMessage,
+    editPost,
+    loadPosts,
     editEvent,
     deleteMessage,
     react,
@@ -1707,6 +1886,10 @@ export function useChat(identity: ChatIdentity) {
     deleteChannel,
     reorderGroups,
     moveChannel,
+    createCategory,
+    renameCategory,
+    deleteCategory,
+    moveCategory,
     joinGroup,
     leaveGroup,
     inviteMember,
@@ -1741,6 +1924,8 @@ export function useChat(identity: ChatIdentity) {
     loadSaved,
     loadBlockedWords,
     setReadReceipts,
+    setDiscoverable,
+    findPeople,
     forwardMessage,
     scheduleMessage,
     loadScheduled,
@@ -1754,6 +1939,10 @@ export function useChat(identity: ChatIdentity) {
     removeBot,
     addEmoji,
     removeEmoji,
+    addSticker,
+    removeSticker,
+    loadEditHistory,
+    setDisappearing,
     saveRole,
     deleteRole,
     reorderRoles,

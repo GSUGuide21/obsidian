@@ -3,8 +3,9 @@
 // path with their extension, and `import type` only from lib/chat/types.
 
 import { randomUUID } from "node:crypto";
-import type { Attachment, ExternalMediaSites } from "../chat/types";
-import { ID_PATTERN, MAX_NAME_LENGTH } from "./constants.ts";
+import type { Attachment, ExternalMediaSites, ForumTag, PollAttachment, QuizAttachment } from "../chat/types";
+import { isEmojiName } from "../chat/types/groups.ts";
+import { ID_PATTERN, MAX_FORUM_TAGS, MAX_NAME_LENGTH, MAX_POST_TAGS, MAX_TAG_NAME_LENGTH } from "./constants.ts";
 import { members } from "./state.ts";
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,12 @@ export function options(value: unknown) {
   return new Set(list).size === list.length ? (list as string[]) : undefined;
 }
 
+/** When a poll or quiz closes: undefined when it doesn't, null when it isn't a future time. */
+function closesAt(value: unknown) {
+  if (value === undefined || value === null) return undefined;
+  return futureTime(value) ?? null;
+}
+
 /** Drop undefined keys so stored messages stay small. */
 export function compact<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;
@@ -84,14 +91,28 @@ export function sanitizeAttachment(value: unknown): Attachment | undefined {
     case "poll": {
       const question = text(a.question, 300);
       const list = options(a.options);
-      return question && list ? { type: "poll", question, options: list } : undefined;
+      const closes = closesAt(a.closesAt);
+      if (!question || !list || closes === null) return undefined;
+      const multiple = a.multiple === true;
+      // A limit only means something between "two" and "all but one".
+      const wanted = Number.isInteger(a.maxChoices) ? (a.maxChoices as number) : 0;
+      const max = multiple && wanted >= 2 && wanted < list.length ? wanted : undefined;
+      return compact<PollAttachment>({
+        type: "poll",
+        question,
+        options: list,
+        ...(multiple && { multiple: true as const }),
+        maxChoices: max,
+        closesAt: closes,
+      });
     }
     case "quiz": {
       const question = text(a.question, 300);
       const list = options(a.options);
       const correctAnswer = text(a.correctAnswer, 100);
-      if (!question || !list || !correctAnswer || !list.includes(correctAnswer)) return undefined;
-      return { type: "quiz", question, options: list, correctAnswer };
+      const closes = closesAt(a.closesAt);
+      if (!question || !list || !correctAnswer || !list.includes(correctAnswer) || closes === null) return undefined;
+      return compact<QuizAttachment>({ type: "quiz", question, options: list, correctAnswer, closesAt: closes });
     }
     case "mention": {
       const userId = typeof a.userId === "string" ? a.userId : "";
@@ -100,6 +121,12 @@ export function sanitizeAttachment(value: unknown): Attachment | undefined {
     case "reply": {
       const messageId = typeof a.messageId === "string" ? a.messageId : "";
       return ID_PATTERN.test(messageId) ? { type: "reply", messageId } : undefined;
+    }
+    // Only its shape: stickerError (posting.ts) checks it's in the pack of the chat it's sent in.
+    case "sticker": {
+      const name = typeof a.name === "string" ? a.name : "";
+      const src = url(a.url);
+      return isEmojiName(name) && src ? { type: "sticker", name, url: src } : undefined;
     }
     // No "link": link cards are made by the server (see previews.ts), never accepted.
     case "external": {
@@ -161,6 +188,11 @@ export function sanitizeAttachments(value: unknown): Attachment[] | string {
     cleaned.push(attachment);
   }
   if (cleaned.filter((a) => a.type === "reply").length > 1) return "A message can only reply to one message.";
+  // A sticker is the whole message (a reply aside): it's shown big, on its own.
+  if (cleaned.some((a) => a.type === "sticker") && cleaned.some((a) => a.type !== "sticker" && a.type !== "reply")) {
+    return "Stickers are sent on their own.";
+  }
+  if (cleaned.filter((a) => a.type === "sticker").length > 1) return "Send one sticker at a time.";
   return cleaned;
 }
 
@@ -168,6 +200,42 @@ export function cleanName(value: unknown) {
   if (typeof value !== "string") return "";
   const name = value.trim().replace(/\s+/g, " ");
   return name.length <= MAX_NAME_LENGTH ? name : "";
+}
+
+/** A forum post's title, on one line; "" if absent or blank (callers check the length). Mirrors cleanTitle in lib/chat/types/messages.ts. */
+export function cleanTitle(value: unknown) {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+}
+
+/**
+ * A forum's tags from a channel draft, in order: names cleaned, kept ids kept
+ * (only ones it already had), new ones given an id. A string says what's wrong.
+ */
+export function cleanForumTags(value: unknown, previous: ForumTag[] = []): ForumTag[] | string {
+  if (!Array.isArray(value)) return "Tags must be a list.";
+  if (value.length > MAX_FORUM_TAGS) return `A forum can have up to ${MAX_FORUM_TAGS} tags.`;
+  const known = new Set(previous.map((tag) => tag.id));
+  const tags: ForumTag[] = [];
+  const names = new Set<string>();
+  for (const raw of value) {
+    const draft = (raw ?? {}) as { id?: unknown; name?: unknown };
+    const name = typeof draft.name === "string" ? draft.name.trim().replace(/\s+/g, " ") : "";
+    if (!name) return "Tags need a name.";
+    if (name.length > MAX_TAG_NAME_LENGTH) return `Tag names are limited to ${MAX_TAG_NAME_LENGTH} characters.`;
+    if (names.has(name.toLowerCase())) return `There's already a tag called “${name}”.`;
+    names.add(name.toLowerCase());
+    const id = typeof draft.id === "string" && known.has(draft.id) ? draft.id : randomUUID().replace(/-/g, "").slice(0, 10);
+    tags.push({ id, name });
+  }
+  return tags;
+}
+
+/** A post's tags: the forum's own tag ids among `value`, once each, at most MAX_POST_TAGS; null when none. */
+export function postTags(value: unknown, forum: ForumTag[] = []): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const known = new Set(forum.map((tag) => tag.id));
+  const tags = [...new Set(value.filter((id): id is string => typeof id === "string" && known.has(id)))];
+  return tags.length ? tags.slice(0, MAX_POST_TAGS) : null;
 }
 
 /** A future time (ms) no more than ~10 years out, or undefined. */

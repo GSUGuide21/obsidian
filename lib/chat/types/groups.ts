@@ -7,6 +7,8 @@ export type GroupType =
   | "text"
   | "announcement"
   | "wiki"
+  /** Each top-level message is a post with a title; replies go in its thread. */
+  | "forum"
   /** Picking it joins its call; its messages are the chat beside the call. */
   | "voice";
 
@@ -20,7 +22,42 @@ export type Subgroup = {
   category?: string;
   /** Slow mode: seconds between each member's messages (moderators exempt); absent when off. */
   slowMode?: number;
+  /** Disappearing messages: seconds (one of DISAPPEAR_TIMES) after which messages are deleted for everyone; absent when off. */
+  disappearAfter?: number;
+  /** Forums only: the tags its posts can carry, in order; absent when it has none. */
+  tags?: ForumTag[];
+  /**
+   * Set on private channels: who's let in besides the group's owner, admins, moderators
+   * and those who manage its channels. Absent: everyone in the group sees it.
+   */
+  access?: ChannelAccess;
 };
+
+/** Who sees a private channel: holders of these custom roles (ids), and these members (ids). */
+export type ChannelAccess = { roles: string[]; members: string[] };
+
+/** Most members a private channel lets in by name (mirrored by a check on channels.allowed_members). */
+export const MAX_CHANNEL_MEMBERS = 100;
+
+/** A forum's tag: members pick up to MAX_POST_TAGS for each post, and filter by them. */
+export type ForumTag = { id: string; name: string };
+
+/** Mirrored by checks on channels.forum_tags and messages.tags. */
+export const MAX_FORUM_TAGS = 20;
+export const MAX_POST_TAGS = 5;
+export const MAX_TAG_NAME_LENGTH = 24;
+
+/** A tag's name on one line (mirrored in lib/server/validation.ts). */
+export function cleanTagName(name: string) {
+  return name.trim().replace(/\s+/g, " ").slice(0, MAX_TAG_NAME_LENGTH).trim();
+}
+
+/** Disappearing message timers, in seconds (0: off): an hour, a day, a week. Mirrored by a check on channels.disappear_after. */
+export const DISAPPEAR_TIMES = [0, 3600, 86400, 604800] as const;
+
+export function isDisappearAfter(value: unknown): value is (typeof DISAPPEAR_TIMES)[number] {
+  return typeof value === "number" && (DISAPPEAR_TIMES as readonly number[]).includes(value);
+}
 
 /**
  * Public groups are listed for everyone and anyone (not banned) can join.
@@ -55,10 +92,18 @@ export type Group = {
   members?: string[];
   /** The group's custom emoji, used as :name: in messages and reactions. */
   emoji?: CustomEmoji[];
+  /** The group's sticker pack: images members send on their own, shown big. */
+  stickers?: Sticker[];
   /** The group's bots and the slash commands they answer. */
   bots?: GroupBot[];
   /** The group's custom roles, in the order they're listed (the first one you hold colors your name). */
   roles?: GroupRole[];
+  /**
+   * The order of its sidebar sections, empty ones included; absent when it
+   * has none listed. Channels' categories not listed here come after these
+   * (see categoryOrder).
+   */
+  categories?: string[];
   /** The custom roles you hold here (ids); absent when none. */
   customRoles?: string[];
 };
@@ -103,6 +148,11 @@ const EMOJI_NAME = /^[a-z0-9_]{2,32}$/;
 export function isEmojiName(name: string) {
   return EMOJI_NAME.test(name);
 }
+
+/** A sticker in a group's pack: an uploaded image, named like custom emoji (see isEmojiName). */
+export type Sticker = { name: string; url: string };
+
+export const MAX_STICKERS = 50;
 
 /** The emoji name in a ":name:" reaction, if that's what it is. */
 export function customEmojiName(reaction: string) {
@@ -209,6 +259,12 @@ export type ChannelDraft = {
   category?: string;
   /** Seconds (one of SLOW_MODES); 0 or absent turns it off. */
   slowMode?: number;
+  /** Seconds (one of DISAPPEAR_TIMES); 0 or absent turns it off. */
+  disappearAfter?: number;
+  /** Forums: their tags, in order. Ones without an `id` are new; ones left out are removed. Absent leaves them as they are. */
+  tags?: { id?: string; name: string }[];
+  /** Private: who's let in (see Subgroup.access); null makes it public; absent leaves it as it is. */
+  access?: ChannelAccess | null;
 };
 
 export const MAX_GROUP_NAME_LENGTH = 64;
@@ -220,6 +276,9 @@ export const MAX_CHANNEL_NAME_LENGTH = 64;
 export const MAX_TOPIC_LENGTH = 200;
 
 export const MAX_CATEGORY_LENGTH = 40;
+
+/** Most categories a group can have (mirrored by a check on groups.categories). */
+export const MAX_CATEGORIES = 50;
 
 /** Channel names keep their case and spaces, like "#Game Night" (mirrored in server.mts). */
 export function cleanChannelName(name: string) {

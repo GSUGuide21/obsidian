@@ -27,7 +27,7 @@ export default function NewDmDialog({ open, onClose, ...props }: NewDmDialogProp
 
 function Picker({ onStart, onClose }: Omit<NewDmDialogProps, "open">) {
   const {
-    state: { users, selfId },
+    state: { users, selfId, members, groups },
   } = useChatContext();
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
@@ -37,9 +37,15 @@ function Picker({ onStart, onClose }: Omit<NewDmDialogProps, "open">) {
   const max = MAX_DM_MEMBERS - 1;
   const needle = query.trim().toLowerCase();
 
+  // People who asked not to be found only show to those who share a group or conversation with them.
+  const shared = new Set([
+    ...Object.values(members).flatMap((list) => list.map((m) => m.user.id)),
+    ...groups.flatMap((g) => g.members ?? []),
+  ]);
   // Signed-in people only: guests' conversations would vanish with them.
   const candidates = Object.values(users)
     .filter((u) => u.id !== selfId && u.role !== "bot" && !u.id.startsWith("guest-"))
+    .filter((u) => !u.unlisted || shared.has(u.id))
     .filter((u) => !needle || u.name.toLowerCase().includes(needle))
     .sort((a, b) => Number(isOnline(b)) - Number(isOnline(a)) || a.name.localeCompare(b.name))
     .slice(0, 50);

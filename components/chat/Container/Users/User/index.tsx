@@ -4,7 +4,8 @@ import Avatar from "@/components/chat/GroupList/Group/Avatar";
 import { mentionInComposer } from "@/components/chat/Container/Chat";
 import { CustomStatus, STATUS_LABELS } from "@/components/chat/Status";
 import UserMenu from "@/components/chat/UserMenu";
-import { isOnline, type User as UserType } from "@/lib/chat/types";
+import { RoleChip } from "@/components/chat/GroupSettings/Roles";
+import { isOnline, type GroupRole, type User as UserType } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
 
 type UserProps = {
@@ -13,6 +14,8 @@ type UserProps = {
   muted?: boolean;
   /** Their role, as a tag (where the list isn't already grouped by role). */
   role?: string;
+  /** Their first custom role, shown beside their name. */
+  customRole?: Pick<GroupRole, "name" | "color">;
   /** The panel's actions for them (their profile, moderation; for you, your profiles and leaving). */
   items: MenuItem[];
   /** Open their profile directly (when there's no menu, e.g. they've gone). */
@@ -23,7 +26,7 @@ type UserProps = {
  * A row in the members panel. Clicking it opens a menu: message, call and
  * mention them (from UserMenu), then the panel's `items`.
  */
-export default function User({ user, isSelf, muted, role, items, onOpen }: UserProps) {
+export default function User({ user, isSelf, muted, role, customRole, items, onOpen }: UserProps) {
   const online = isOnline(user);
   const custom = Boolean(user.statusEmoji || user.statusText);
   // Under the name: their custom status, else when they're away or busy.
@@ -47,6 +50,7 @@ export default function User({ user, isSelf, muted, role, items, onOpen }: UserP
           Bot
         </span>
       )}
+      {customRole && <RoleChip role={customRole} className="max-w-24 shrink-0" />}
       {role && <span className="shrink-0 text-[11px] text-muted">{role}</span>}
       {muted && <VolumeOff aria-label="Muted" className="size-3.5 shrink-0 text-warning" />}
     </>

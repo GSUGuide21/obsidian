@@ -54,7 +54,7 @@ export function snapshotOf(row: MessageRow): MessageSnapshot {
 }
 
 export function channelSnapshot(
-  channel: Pick<Subgroup, "id" | "name" | "type" | "topic" | "category" | "slowMode">,
+  channel: Pick<Subgroup, "id" | "name" | "type" | "topic" | "category" | "slowMode" | "disappearAfter" | "tags">,
 ): ChannelSnapshot {
   return {
     id: channel.id,
@@ -63,6 +63,9 @@ export function channelSnapshot(
     ...(channel.topic && { topic: channel.topic }),
     ...(channel.category && { category: channel.category }),
     ...(channel.slowMode && { slowMode: channel.slowMode }),
+    ...(channel.disappearAfter && { disappearAfter: channel.disappearAfter }),
+    // A forum's tags, by name (only forums show them).
+    ...(channel.type === "forum" && channel.tags?.length && { tags: channel.tags.map((tag) => tag.name) }),
   };
 }
 

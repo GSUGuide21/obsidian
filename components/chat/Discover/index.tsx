@@ -16,17 +16,23 @@ import {
   type Message,
 } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
+import People from "./People";
+import { useT } from "@/lib/i18n";
 
 type DiscoverProps = {
   /** Open the group's first channel. */
   onOpenGroup: (groupId: string) => void;
   /** Go to the message an event was posted in. */
   onOpenEvent: (message: Message) => void;
+  /** Open a chat (e.g. a direct message started from the People tab). */
+  onOpenChat: (subgroupId: string) => void;
   onOpenSidebar: () => void;
 };
 
-/** Public groups to browse and join, and what's coming up in them. */
-export default function Discover({ onOpenGroup, onOpenEvent, onOpenSidebar }: DiscoverProps) {
+/** Public groups to browse and join, what's coming up in them, and people to talk to. */
+export default function Discover({ onOpenGroup, onOpenEvent, onOpenChat, onOpenSidebar }: DiscoverProps) {
+  const [tab, setTab] = useState<"groups" | "people">("groups");
+  const t = useT();
   const { state, watchDiscover: onWatch, joinGroup: onJoin } = useChatContext();
   // `latest` is the latest message per channel, for when each group was last active.
   const { groups, latest, users } = state;
@@ -87,13 +93,39 @@ export default function Discover({ onOpenGroup, onOpenEvent, onOpenSidebar }: Di
         </button>
         <Compass aria-hidden className="size-5 text-muted" />
         <div className="min-w-0 flex-1">
-          <h1 className="truncate leading-tight font-semibold">Discover</h1>
-          <p className="truncate text-xs text-muted">Public groups and upcoming events</p>
+          <h1 className="truncate leading-tight font-semibold">{t("discover.title")}</h1>
+          <p className="truncate text-xs text-muted">{t("discover.subtitle")}</p>
+        </div>
+        <div role="tablist" aria-label={t("discover.tabs")} className="flex rounded-lg bg-surface-2 p-0.5 text-xs font-medium">
+          {(
+            [
+              ["groups", t("discover.tab.groups")],
+              ["people", t("discover.tab.people")],
+            ] as const
+          ).map(([option, label]) => (
+            <button
+              key={option}
+              type="button"
+              role="tab"
+              aria-selected={tab === option}
+              onClick={() => setTab(option)}
+              className={cn(
+                "rounded-md px-3 py-1 transition-colors",
+                tab === option ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground",
+              )}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </header>
 
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6">
+          {tab === "people" ? (
+            <People onOpenChat={onOpenChat} />
+          ) : (
+          <>
           <label className="relative block">
             <span className="sr-only">Search groups and events</span>
             <Search aria-hidden className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted" />
@@ -195,6 +227,8 @@ export default function Discover({ onOpenGroup, onOpenEvent, onOpenSidebar }: Di
               </ul>
             )}
           </section>
+          </>
+          )}
         </div>
       </div>
     </main>

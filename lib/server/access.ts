@@ -2,8 +2,8 @@
 // Loaded by Node's type stripping (see server.mts): imports from the app are by
 // path with their extension, and `import type` only from lib/chat/types.
 
-import type { Group, Member, MemberProfile, MemberRole, NotificationLevel, ObsidianSettings, Permission, Standing } from "../chat/types";
-import { allows, canView, grantedBy, hasPermission, isMemberRole, isMuted, outranks } from "../chat/types/permissions.ts";
+import type { Group, Member, MemberProfile, MemberRole, NotificationLevel, ObsidianSettings, Permission, Standing, Subgroup } from "../chat/types";
+import { allows, canView, grantedBy, hasPermission, isMemberRole, isMuted, letsIn, outranks } from "../chat/types/permissions.ts";
 import { MAX_INSTANCE_NAME_LENGTH, MAX_NOTICE_LENGTH } from "./constants.ts";
 import { db } from "./db.ts";
 import { discoverChanged } from "./discover.ts";
@@ -18,7 +18,7 @@ import { toUser } from "./users.ts";
 // app-wide admins manage everything. Mirrors the limits in lib/chat/types/groups.ts.
 // ---------------------------------------------------------------------------
 
-export const CHANNEL_TYPES = new Set(["text", "announcement", "wiki", "voice"]);
+export const CHANNEL_TYPES = new Set(["text", "announcement", "wiki", "voice", "forum"]);
 
 export const MANAGE_CHANNELS_ERROR = "Only the group's owner and admins can manage its channels.";
 
@@ -206,11 +206,35 @@ export function canAccess(group: Group, userId: string | undefined, access = (us
   return canView(group.visibility, access.groups.has(group.id));
 }
 
+/**
+ * Whether a private channel lets them in (public ones let in everyone who can
+ * read the group): the group's owner, admins and moderators, whoever a
+ * custom role lets manage its channels, app-wide admins, and the roles and
+ * members it names (see letsIn). Takes their access so it works for people without a
+ * session too (e.g. deciding whether to push to them).
+ */
+export function channelAllows(channel: Subgroup, userId: string | undefined, access: Access = (userId && accessByMember.get(userId)) || noAccess) {
+  if (!channel.access) return true;
+  if (!userId) return false;
+  if (isAdmin(userId)) return true;
+  return letsIn(channel.access, userId, access.groups.get(channel.groupId), findGroup(channel.groupId)?.roles);
+}
+
+/** Whether they can read the channel: its group, and (when it's private) the channel itself. */
+export function canSeeChannel(channel: Subgroup, userId: string | undefined, access: Access = (userId && accessByMember.get(userId)) || noAccess) {
+  const group = findGroup(channel.groupId);
+  return Boolean(group && canAccess(group, userId, access) && channelAllows(channel, userId, access));
+}
+
+/** The group's channels they can read (all of them, unless some are private). */
+export function visibleChannels(group: Group, userId: string | undefined, access: Access = (userId && accessByMember.get(userId)) || noAccess) {
+  return group.subgroups.filter((channel) => channelAllows(channel, userId, access));
+}
+
 /** The channel, if it exists and they can read it. */
 export function channelFor(channelId: unknown, userId: string | undefined) {
   const channel = typeof channelId === "string" ? channels.get(channelId) : undefined;
-  const group = channel && findGroup(channel.groupId);
-  return group && canAccess(group, userId) ? channel : undefined;
+  return channel && canSeeChannel(channel, userId) ? channel : undefined;
 }
 
 /**
@@ -223,8 +247,11 @@ export function listedGroups(userId: string | undefined): Group[] {
   const listed = groups.flatMap((group): Group[] => {
     const membership = access.groups.get(group.id);
     if (canAccess(group, userId)) {
-      if (!membership) return [group];
-      return [{ ...group, role: membership.role, ...(membership.roles?.length && { customRoles: membership.roles }) }];
+      // Private channels only reach those they let in.
+      const subgroups = visibleChannels(group, userId, access);
+      const shown = subgroups.length === group.subgroups.length ? group : { ...group, subgroups };
+      if (!membership) return [shown];
+      return [{ ...shown, role: membership.role, ...(membership.roles?.length && { customRoles: membership.roles }) }];
     }
     if (access.invites.has(group.id) && !isBanned(access, group.id)) return [{ ...group, subgroups: [], invited: true }];
     return [];
@@ -282,16 +309,36 @@ export function mutedIn(groupId: string, userId: string) {
 
 export const groupRoom = (groupId: string) => `group:${groupId}`;
 
-/** Send to everyone who can read the channel's group. */
-export function toChannel(channelId: string) {
-  return io.to(groupRoom(channels.get(channelId)?.groupId ?? ""));
+/** A private channel's own room: only the sockets it lets in. */
+export const channelRoom = (channelId: string) => `channel:${channelId}`;
+
+/** The room for a channel's events: its group's, or its own when it's private. */
+export function roomFor(channelId: string) {
+  const channel = channels.get(channelId);
+  return channel?.access ? channelRoom(channelId) : groupRoom(channel?.groupId ?? "");
 }
 
-/** Put the socket in the rooms of exactly the groups it can read. */
+/** Send to everyone who can read the channel. */
+export function toChannel(channelId: string) {
+  return io.to(roomFor(channelId));
+}
+
+/** Put the socket in the rooms of exactly the groups (and private channels) it can read. */
 export function syncRooms(socket: ChatSocket) {
+  const userId = socket.data.userId;
   for (const group of groups) {
-    if (canAccess(group, socket.data.userId)) void socket.join(groupRoom(group.id));
+    const readable = canAccess(group, userId);
+    if (readable) void socket.join(groupRoom(group.id));
     else void socket.leave(groupRoom(group.id));
+    for (const channel of group.subgroups) {
+      if (!channel.access) continue;
+      if (readable && channelAllows(channel, userId)) void socket.join(channelRoom(channel.id));
+      else void socket.leave(channelRoom(channel.id));
+    }
+  }
+  // Rooms of private channels that were deleted or made public.
+  for (const room of socket.rooms) {
+    if (room.startsWith("channel:") && !channels.get(room.slice("channel:".length))?.access) void socket.leave(room);
   }
 }
 

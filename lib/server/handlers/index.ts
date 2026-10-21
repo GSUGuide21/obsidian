@@ -11,6 +11,7 @@ import { registerIntegrationsHandlers } from "./integrations.ts";
 import { registerCallsHandlers } from "./calls.ts";
 import { registerSavedHandlers } from "./saved.ts";
 import { registerRolesHandlers } from "./roles.ts";
+import { registerPeopleHandlers } from "./people.ts";
 
 export function registerHandlers(socket: ChatSocket) {
   registerSessionHandlers(socket);
@@ -23,4 +24,5 @@ export function registerHandlers(socket: ChatSocket) {
   registerCallsHandlers(socket);
   registerSavedHandlers(socket);
   registerRolesHandlers(socket);
+  registerPeopleHandlers(socket);
 }

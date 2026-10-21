@@ -1,13 +1,18 @@
 "use client";
 
 import { useEffect, useId, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
-import { Clock, CornerUpLeft, Mic, SendHorizontal, X } from "lucide-react";
+import { Clock, CornerUpLeft, Hash, Mic, SendHorizontal, Smile, Type, X } from "lucide-react";
+import Avatar from "@/components/chat/GroupList/Group/Avatar";
 import Dialog from "@/components/Dialog";
 import TextArea from "@/components/form/TextArea";
 import { summarize } from "@/lib/chat/format";
 import { createId } from "@/lib/chat/id";
 import { runCommand, suggestCommands, type Command } from "@/lib/chat/commands";
+import type { LinkableChannel } from "@/lib/chat/channelLinks";
 import { readDraft, writeDraft } from "@/lib/chat/drafts";
+import { searchEmoji } from "@/lib/chat/emoji";
+import { shortcutMark, toggleMark, type Edit } from "@/lib/chat/formatting";
+import { usePersistentSet } from "@/lib/chat/prefs";
 import { externalAttachments } from "@/lib/chat/links";
 import {
   INLINE_UPLOAD_TYPES,
@@ -17,6 +22,7 @@ import {
   type GifResult,
   type LinkPreview,
   type Message,
+  type Sticker,
   type User,
 } from "@/lib/chat/types";
 import { previewTarget } from "@/lib/chat/unfurl";
@@ -27,9 +33,12 @@ import LinkCard from "../Message/Attachment/Link";
 import AttachMenu, { AttachButtons, type AttachChoice } from "./AttachMenu";
 import EventForm from "./EventForm";
 import GifPicker from "./GifPicker";
-import MentionMenu, { mentionOptionId } from "./MentionMenu";
+import ComposerEmojiPicker from "./EmojiPicker";
+import FormatBar from "./FormatBar";
+import SuggestionMenu, { mentionOptionId, type Suggestion } from "./MentionMenu";
 import OptionsForm from "./OptionsForm";
 import ScheduleForm from "./ScheduleForm";
+import StickerPicker from "./StickerPicker";
 import Tray, { type Draft } from "./Tray";
 import VoiceRecorder from "./VoiceRecorder";
 
@@ -39,6 +48,21 @@ const MAX_DRAFTS = 10;
 const MAX_MENTIONS = 5;
 /** Show the remaining-characters count once this close to the limit. */
 const COUNT_FROM = MAX_MESSAGE_LENGTH - 200;
+
+type SuggestKind = "mention" | "emoji" | "channel";
+
+/** The word before the caret that opens suggestions: "@name", ":shortcode" (two letters at least, so "10:30" doesn't) and "#channel". */
+const SUGGEST_TRIGGERS: { kind: SuggestKind; pattern: RegExp }[] = [
+  { kind: "mention", pattern: /(?:^|\s)@([^\s@]{0,32})$/ },
+  { kind: "emoji", pattern: /(?:^|\s):([a-z0-9_+-]{2,32})$/i },
+  { kind: "channel", pattern: /(?:^|\s)#([^\s#]{0,32})$/ },
+];
+
+const SUGGEST_LABELS: Record<SuggestKind, string> = {
+  mention: "Mention someone",
+  emoji: "Emoji",
+  channel: "Link a channel",
+};
 
 export type ComposerHandle = {
   addFiles: (files: File[]) => void;
@@ -71,10 +95,18 @@ type ComposerProps = {
   onEditLast?: () => boolean;
   /** GIF search is available (the GIF picker and /gif). */
   gifs?: boolean;
+  /** The group's sticker pack; the sticker picker shows when it has any. */
+  stickers?: Sticker[];
   /** "Send later": schedule the message instead. Resolves to an error message. */
   onSchedule?: (text: string, attachments: Attachment[], sendAt: number) => Promise<string | undefined>;
   /** Commands the server runs here (see serverCommands), suggested after the composer's own. */
   commands?: Command[];
+  /** The group's custom emoji (name → image URL), for the picker and ":name:" suggestions. */
+  emoji?: Record<string, string>;
+  /** The group's channels you can see, for "#channel" suggestions (they become links). */
+  channels?: LinkableChannel[];
+  /** Why nothing can be sent yet (e.g. a forum post without its title), shown on the send button. */
+  held?: string;
 };
 
 export default function Composer({
@@ -93,8 +125,12 @@ export default function Composer({
   onTyping = () => {},
   onEditLast,
   gifs = false,
+  stickers = [],
   onSchedule,
   commands: serverCommands = [],
+  held,
+  emoji,
+  channels = [],
 }: ComposerProps) {
   const [text, setText] = useState(() => readDraft(draftKey));
   // Keep the draft as it's typed (sending empties it, which forgets it).
@@ -103,12 +139,16 @@ export default function Composer({
   }, [draftKey, text]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [recording, setRecording] = useState(false);
-  const [dialog, setDialog] = useState<"poll" | "quiz" | "event" | "gif" | "schedule" | null>(null);
+  const [dialog, setDialog] = useState<"poll" | "quiz" | "event" | "gif" | "sticker" | "schedule" | null>(null);
   // What /gif searched for, when it opened the picker.
   const [gifQuery, setGifQuery] = useState("");
   const [commandIndex, setCommandIndex] = useState(0);
   const [notice, setNotice] = useState<string>();
-  const [mention, setMention] = useState<{ start: number; end: number; query: string } | null>(null);
+  const [mention, setMention] = useState<{ kind: SuggestKind; start: number; end: number; query: string } | null>(null);
+  const [pickingEmoji, setPickingEmoji] = useState(false);
+  // Whether the formatting buttons show, remembered in this browser.
+  const [composerPrefs, toggleComposerPref] = usePersistentSet("obsidian-chat:composer");
+  const formatting = composerPrefs.has("formatting");
   const [mentionIndex, setMentionIndex] = useState(0);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -179,7 +219,7 @@ export default function Composer({
   function addFiles(files: File[]) {
     if (files.length === 0) return;
     if (!canUpload) {
-      setNotice("Sign in with Google to attach files.");
+      setNotice("Sign in to attach files.");
       return;
     }
     setNotice(undefined);
@@ -233,44 +273,98 @@ export default function Composer({
     textRef.current?.focus();
   }
 
-  // ---- Mentions -----------------------------------------------------------
+  // ---- Suggestions: @people, :emoji: and #channels -------------------------
 
+  /** What the word before the caret could become: "@ad" a mention, ":smi" an emoji, "#gen" a channel. */
   function syncMention(el: HTMLTextAreaElement) {
     const caret = el.selectionStart;
-    const match = caret === el.selectionEnd ? el.value.slice(0, caret).match(/(?:^|\s)@([^\s@]{0,32})$/) : null;
-    if (!match) {
+    const before = caret === el.selectionEnd ? el.value.slice(0, caret) : null;
+    const found = before === null ? null : SUGGEST_TRIGGERS.find(({ kind, pattern }) => (kind !== "channel" || channels.length > 0) && pattern.test(before));
+    const match = found && before!.match(found.pattern);
+    if (!found || !match) {
       if (mention) setMention(null);
       return;
     }
     const query = match[1];
-    if (query !== mention?.query) setMentionIndex(0);
-    setMention({ start: caret - query.length - 1, end: caret, query });
+    if (query !== mention?.query || found.kind !== mention?.kind) setMentionIndex(0);
+    setMention({ kind: found.kind, start: caret - query.length - 1, end: caret, query });
   }
 
   const query = mention?.query.toLowerCase() ?? "";
-  const candidates = mention
-    ? Object.values(users)
-        .filter((u) => u.id !== selfId && u.name.toLowerCase().includes(query))
-        .sort(
-          (a, b) =>
-            Number(b.name.toLowerCase().startsWith(query)) - Number(a.name.toLowerCase().startsWith(query)) ||
-            Number(isOnline(b)) - Number(isOnline(a)) ||
-            a.name.localeCompare(b.name),
-        )
-        .slice(0, 6)
-    : [];
+  const candidates: Suggestion[] = !mention
+    ? []
+    : mention.kind === "mention"
+      ? Object.values(users)
+          .filter((u) => u.id !== selfId && u.name.toLowerCase().includes(query))
+          .sort(
+            (a, b) =>
+              Number(b.name.toLowerCase().startsWith(query)) - Number(a.name.toLowerCase().startsWith(query)) ||
+              Number(isOnline(b)) - Number(isOnline(a)) ||
+              a.name.localeCompare(b.name),
+          )
+          .slice(0, 6)
+          .map((user) => ({
+            key: user.id,
+            label: user.name,
+            icon: <Avatar name={user.name} color={user.color} src={user.avatarUrl} size="sm" status={user.status} />,
+            insert: `@${user.name} `,
+          }))
+      : mention.kind === "emoji"
+        ? searchEmoji(query, emoji, 6).map((found) =>
+            found.kind === "custom"
+              ? {
+                  key: `custom:${found.name}`,
+                  label: `:${found.name}:`,
+                  // eslint-disable-next-line @next/next/no-img-element -- uploaded emoji
+                  icon: <img src={found.url} alt="" className="size-5" />,
+                  hint: "Custom",
+                  insert: `:${found.name}: `,
+                }
+              : { key: found.name, label: `:${found.name}:`, icon: <span className="text-lg">{found.emoji}</span>, insert: found.emoji },
+          )
+        : channels
+            .filter((c) => c.name.toLowerCase().includes(query))
+            .sort((a, b) => Number(b.name.toLowerCase().startsWith(query)) - Number(a.name.toLowerCase().startsWith(query)))
+            .slice(0, 6)
+            .map((channel) => ({
+              key: channel.id,
+              label: channel.name,
+              icon: <Hash aria-hidden className="size-4 text-muted" />,
+              insert: `#${channel.name} `,
+            }));
   const menuOpen = candidates.length > 0;
   const activeIndex = Math.min(mentionIndex, candidates.length - 1);
 
-  function pickMention(user: User) {
+  function pickMention(item: Suggestion) {
     if (!mention) return;
-    const insert = `@${user.name} `;
-    setText(text.slice(0, mention.start) + insert + text.slice(mention.end));
+    setText(text.slice(0, mention.start) + item.insert + text.slice(mention.end));
     setMention(null);
-    const caret = mention.start + insert.length;
+    const caret = mention.start + item.insert.length;
     requestAnimationFrame(() => {
       textRef.current?.focus();
       textRef.current?.setSelectionRange(caret, caret);
+    });
+  }
+
+  // ---- Emoji and formatting -----------------------------------------------
+
+  /** Change the text and its selection (see lib/chat/formatting.ts), then put the cursor back. */
+  function applyEdit(change: (edit: Edit) => Edit) {
+    const el = textRef.current;
+    const next = change({ text, start: el?.selectionStart ?? text.length, end: el?.selectionEnd ?? text.length });
+    if (next.text.length > MAX_MESSAGE_LENGTH) return;
+    setText(next.text);
+    requestAnimationFrame(() => {
+      textRef.current?.focus();
+      textRef.current?.setSelectionRange(next.start, next.end);
+    });
+  }
+
+  /** Put an emoji (or ":custom:") in at the cursor, replacing any selection. */
+  function insertEmoji(value: string) {
+    applyEdit(({ text: current, start, end }) => {
+      const insert = value.startsWith(":") ? `${value} ` : value;
+      return { text: current.slice(0, start) + insert + current.slice(end), start: start + insert.length, end: start + insert.length };
     });
   }
 
@@ -279,12 +373,14 @@ export default function Composer({
   const uploading = drafts.some((d) => !d.attachment && !d.error);
   const failed = drafts.some((d) => d.error);
   const ready = drafts.flatMap((d) => (d.attachment ? [d.attachment] : []));
-  const canSend = !uploading && !failed && (text.trim().length > 0 || ready.length > 0);
-  const sendHint = uploading
-    ? "Wait for uploads to finish"
-    : failed
-      ? "Remove failed uploads first"
-      : "Send message";
+  const canSend = !held && !uploading && !failed && (text.trim().length > 0 || ready.length > 0);
+  const sendHint = held
+    ? held
+    : uploading
+      ? "Wait for uploads to finish"
+      : failed
+        ? "Remove failed uploads first"
+        : "Send message";
 
   // ---- Slash commands -----------------------------------------------------
 
@@ -367,9 +463,22 @@ export default function Composer({
   /** Send a GIF from the picker right away (as a reply, if one's in progress). */
   function sendGif(gif: GifResult) {
     setDialog(null);
+    if (held) return setNotice(held);
     onSend("", [
       ...(replyTo ? [{ type: "reply" as const, messageId: replyTo.message.id }] : []),
       { type: "image", src: gif.url, alt: gif.title, ...(gif.width && { width: gif.width }), ...(gif.height && { height: gif.height }) },
+    ]);
+    if (replyTo) onCancelReply();
+    textRef.current?.focus();
+  }
+
+  /** Send a sticker from the pack right away, on its own (as a reply, if one's in progress). */
+  function sendSticker(sticker: Sticker) {
+    setDialog(null);
+    if (held) return setNotice(held);
+    onSend("", [
+      ...(replyTo ? [{ type: "reply" as const, messageId: replyTo.message.id }] : []),
+      { type: "sticker", name: sticker.name, url: sticker.url },
     ]);
     if (replyTo) onCancelReply();
     textRef.current?.focus();
@@ -411,10 +520,14 @@ export default function Composer({
         <div className="min-w-0 flex-1">{status}</div>
         {hint && <span className="shrink-0">{hint}</span>}
       </div>
+      {pickingEmoji && (
+        <ComposerEmojiPicker custom={emoji} onPick={insertEmoji} onClose={() => setPickingEmoji(false)} />
+      )}
       {menuOpen && (
-        <MentionMenu
+        <SuggestionMenu
           id={menuId}
-          users={candidates}
+          label={SUGGEST_LABELS[mention?.kind ?? "mention"]}
+          items={candidates}
           activeIndex={activeIndex}
           onPick={pickMention}
           onHover={setMentionIndex}
@@ -533,6 +646,7 @@ export default function Composer({
           </div>
         ) : (
           <>
+            {formatting && <FormatBar onApply={applyEdit} />}
             <label htmlFor={inputId} className="sr-only">
               {label}
             </label>
@@ -570,6 +684,13 @@ export default function Composer({
                 }
               }}
               onKeyDown={(event) => {
+                // Ctrl/⌘+B, I, E, Shift+X, Shift+H: bold, italic, code, strikethrough, spoiler.
+                const mark = shortcutMark(event);
+                if (mark) {
+                  event.preventDefault();
+                  applyEdit((edit) => toggleMark(edit, mark));
+                  return;
+                }
                 if (menuOpen) {
                   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                     event.preventDefault();
@@ -629,8 +750,42 @@ export default function Composer({
 
             {/* The toolbar: what to add on the left, sending on the right. */}
             <div className="flex items-center gap-1 px-2 pb-2">
-              <AttachMenu canUpload={canUpload} gifs={gifs} onPick={pickAttachment} className="sm:hidden" />
-              <AttachButtons canUpload={canUpload} gifs={gifs} onPick={pickAttachment} className="hidden sm:flex" />
+              <AttachMenu
+                canUpload={canUpload}
+                gifs={gifs}
+                stickers={stickers.length > 0}
+                onPick={pickAttachment}
+                className="sm:hidden"
+              />
+              <AttachButtons
+                canUpload={canUpload}
+                gifs={gifs}
+                stickers={stickers.length > 0}
+                onPick={pickAttachment}
+                className="hidden sm:flex"
+              />
+              <span aria-hidden className="mx-1 hidden h-5 w-px bg-border sm:block" />
+              <button
+                type="button"
+                onClick={() => setPickingEmoji((open) => !open)}
+                data-emoji-toggle
+                aria-label="Add an emoji"
+                aria-expanded={pickingEmoji}
+                title="Emoji"
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-2 hover:text-foreground aria-expanded:bg-surface-2 aria-expanded:text-foreground"
+              >
+                <Smile className="size-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => toggleComposerPref("formatting")}
+                aria-pressed={formatting}
+                aria-label="Formatting"
+                title={formatting ? "Hide formatting" : "Show formatting"}
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-2 hover:text-foreground aria-pressed:bg-surface-2 aria-pressed:text-foreground"
+              >
+                <Type className="size-4" />
+              </button>
               {canRecord && canUpload && (
                 <>
                   <span aria-hidden className="mx-1 hidden h-5 w-px bg-border sm:block" />
@@ -734,6 +889,11 @@ export default function Composer({
       {gifs && (
         <Dialog open={dialog === "gif"} title="Send a GIF" onClose={() => setDialog(null)} size="lg">
           {dialog === "gif" && <GifPicker initialQuery={gifQuery} onPick={sendGif} />}
+        </Dialog>
+      )}
+      {stickers.length > 0 && (
+        <Dialog open={dialog === "sticker"} title="Send a sticker" onClose={() => setDialog(null)}>
+          {dialog === "sticker" && <StickerPicker stickers={stickers} onPick={sendSticker} />}
         </Dialog>
       )}
       {onSchedule && (

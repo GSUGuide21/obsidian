@@ -2,7 +2,8 @@
 
 import { useLayoutEffect, useSyncExternalStore } from "react";
 import { applyAppearance, DEFAULT_APPEARANCE, SETTINGS_KEY, type Appearance } from "./appearance";
-import { setClock } from "./format";
+import { resolveLocale, type LanguageChoice } from "../i18n/locales";
+import { setClock, setFormatLocale } from "./format";
 
 /** Preferences kept in this browser (devices differ per computer, so they aren't synced). */
 export type Settings = Appearance & {
@@ -12,9 +13,17 @@ export type Settings = Appearance & {
   speakerId: string | null;
   /** Incoming calls ring (they always show). */
   ringtone: boolean;
+  /** The interface language; "auto" follows the browser (see lib/i18n). */
+  language: LanguageChoice;
 };
 
-const DEFAULTS: Settings = { micId: null, cameraId: null, speakerId: null, ringtone: true, ...DEFAULT_APPEARANCE };
+const DEFAULTS: Settings = { micId: null, cameraId: null, speakerId: null, ringtone: true, language: "auto", ...DEFAULT_APPEARANCE };
+
+/** Dates and times follow the interface language. */
+function applyLanguage(settings: Settings) {
+  const languages = typeof navigator === "undefined" ? [] : navigator.languages;
+  setFormatLocale(resolveLocale(settings.language, languages));
+}
 const listeners = new Set<() => void>();
 let cached: Settings | null = null;
 
@@ -28,12 +37,14 @@ export function getSettings(): Settings {
     cached = DEFAULTS; // storage blocked or corrupt: defaults for this visit
   }
   setClock(cached.clock);
+  applyLanguage(cached);
   return cached;
 }
 
 export function updateSettings(changes: Partial<Settings>) {
   cached = { ...getSettings(), ...changes };
   setClock(cached.clock);
+  applyLanguage(cached);
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(cached));
   } catch {
@@ -59,11 +70,15 @@ export function useSettings() {
  * theme color with the page's background.
  */
 export function AppearanceSync() {
-  const { theme, textSize, density } = useSettings();
+  const { theme, accent, textSize, density, language } = useSettings();
+  // <html lang> says what language the interface is in (for screen readers, hyphenation…).
   useLayoutEffect(() => {
-    applyAppearance(document.documentElement, { theme, textSize, density });
+    document.documentElement.lang = resolveLocale(language, navigator.languages);
+  }, [language]);
+  useLayoutEffect(() => {
+    applyAppearance(document.documentElement, { theme, accent, textSize, density });
     syncThemeColor();
-  }, [theme, textSize, density]);
+  }, [theme, accent, textSize, density]);
   // "Match system" follows the device as it switches.
   useLayoutEffect(() => {
     if (theme !== "system") return;

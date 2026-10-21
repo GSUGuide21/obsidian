@@ -4,12 +4,15 @@ import { useId, useState } from "react";
 import {
   Ban,
   Bookmark,
+  Check,
   BookmarkCheck,
   ChevronRight,
   CornerUpLeft,
   Flag,
   Forward,
+  Link2,
   Hash,
+  Hourglass,
   Info,
   MessageSquareDot,
   MessagesSquare,
@@ -32,12 +35,14 @@ import EventForm from "@/components/chat/Container/Chat/Composer/EventForm";
 import UserMenu from "@/components/chat/UserMenu";
 import TextArea from "@/components/form/TextArea";
 import { authorName, formatDateTime, formatRelative, formatTime, summarize, systemText } from "@/lib/chat/format";
+import { messageLink } from "@/lib/chat/url";
 import ForwardDialog from "../ForwardDialog";
 import {
   MAX_MESSAGE_LENGTH,
   MAX_REPORT_REASON_LENGTH,
   type EventAttachment,
   type Message as MessageType,
+  type MessageVersion,
   type SystemEvent,
   type ThreadSummary,
   type User,
@@ -46,6 +51,7 @@ import type { ChatMessage } from "@/lib/chat/useChat";
 import { cn } from "@/lib/utils";
 import Attachment from "./Attachment";
 import Mention from "./Attachment/Mention";
+import EditHistory from "./EditHistory";
 import Reply from "./Attachment/Reply";
 import MarkdownText from "./Markdown";
 import Reactions, { EmojiPicker } from "./Reactions";
@@ -77,7 +83,7 @@ type MessageProps = {
   /** `skipConfirm` when shift-clicked. */
   onDelete: (message: MessageType, skipConfirm: boolean) => void;
   onReact: Action<[id: string, emoji: string]>;
-  onVote: Action<[id: string, poll: number, option: number | null]>;
+  onVote: Action<[id: string, poll: number, option: number | null, chosen?: boolean]>;
   /** Replace an event in the message; offered to whoever can delete it (its author and moderators). */
   onEditEvent?: Action<[id: string, index: number, event: EventAttachment]>;
   /** Absent where pinning isn't allowed (guests, thread replies). */
@@ -104,6 +110,8 @@ type MessageProps = {
   onJump?: (messageId: string) => void;
   /** Put "@name" in the composer (from the author's menu). */
   onMention?: (name: string) => void;
+  /** Every version of an edited message's text (see EditHistory); "(edited)" opens them. */
+  onLoadHistory?: (id: string) => Promise<MessageVersion[] | undefined>;
 };
 
 export default function Message({
@@ -136,14 +144,28 @@ export default function Message({
   blocked = false,
   onJump,
   onMention,
+  onLoadHistory,
 }: MessageProps) {
   const [picking, setPicking] = useState(false);
+  const [viewingHistory, setViewingHistory] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [reporting, setReporting] = useState(false);
   const [forwarding, setForwarding] = useState(false);
   // The event (by attachment index) open in the manage dialog.
   const [managing, setManaging] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string>();
+  // Briefly true after "Copy link", to say it worked.
+  const [copied, setCopied] = useState(false);
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(messageLink(window.location.origin, message));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setActionError("Couldn't copy the link. Your browser may not allow it here.");
+    }
+  }
 
   const author = users[message.authorId];
   const name = authorName(author, message.authorId);
@@ -326,16 +348,23 @@ export default function Message({
                 </p>
               )}
               {message.text && (
-                <MarkdownText text={message.text} mentions={named} users={users} selfId={selfId} emoji={emoji} />
+                <MarkdownText text={message.text} mentions={named} users={users} selfId={selfId} emoji={emoji} subgroupId={message.subgroupId} />
               )}
-              {message.editedAt && (
-                <span
-                  className="text-[11px] text-muted"
-                  title={`Edited ${formatDateTime(message.editedAt)}`}
-                >
-                  (edited)
-                </span>
-              )}
+              {message.editedAt &&
+                (onLoadHistory && confirmed ? (
+                  <button
+                    type="button"
+                    onClick={() => setViewingHistory(true)}
+                    className="text-[11px] text-muted hover:text-foreground hover:underline"
+                    title={`Edited ${formatDateTime(message.editedAt)}. Show what it said before.`}
+                  >
+                    (edited)
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-muted" title={`Edited ${formatDateTime(message.editedAt)}`}>
+                    (edited)
+                  </span>
+                ))}
             </div>
           )
         )}
@@ -358,7 +387,7 @@ export default function Message({
                         votes: message.pollVotes?.[index],
                         selfId,
                         users,
-                        onVote: (option) => onVote(message.id, index, option),
+                        onVote: (option, chosen) => onVote(message.id, index, option, chosen),
                       }
                     : undefined
                 }
@@ -437,6 +466,9 @@ export default function Message({
               <Forward className="size-4" />
             </ToolbarButton>
           )}
+          <ToolbarButton label={copied ? "Link copied" : "Copy link to message"} onClick={() => void copyLink()}>
+            {copied ? <Check className="size-4 text-online" /> : <Link2 className="size-4" />}
+          </ToolbarButton>
           {onPin && (
             <ToolbarButton
               label={message.pinned ? "Unpin message" : "Pin message"}
@@ -503,6 +535,14 @@ export default function Message({
           authorName={name}
           onSubmit={(reason) => onReport(message.id, reason)}
           onClose={() => setReporting(false)}
+        />
+      )}
+      {onLoadHistory && viewingHistory && (
+        <EditHistory
+          messageId={message.id}
+          authorName={name}
+          onLoad={onLoadHistory}
+          onClose={() => setViewingHistory(false)}
         />
       )}
       {onEditEvent && managing !== null && managed?.type === "event" && (
@@ -682,6 +722,7 @@ const SYSTEM_ICONS: Record<SystemEvent["type"], LucideIcon> = {
   channel_create: Hash,
   channel_rename: Pencil,
   channel_topic: Info,
+  channel_disappear: Hourglass,
   member_kick: UserX,
   member_ban: Ban,
   member_role: ShieldCheck,

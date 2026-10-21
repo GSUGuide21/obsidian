@@ -24,6 +24,13 @@ import {
   roleOf,
   type MemberRole,
   type Permission,
+  allows,
+  canAssignRoles,
+  canManageRoles,
+  grantedBy,
+  isRolePermission,
+  mayActOn,
+  type RolePermission,
 } from "../lib/chat/types/permissions.ts";
 
 const ROLES: MemberRole[] = ["member", "moderator", "admin", "owner"];
@@ -173,5 +180,51 @@ describe("guards", () => {
     assert.equal(canJoinGroup("private", { banned: false, invited: false }), false);
     assert.equal(canJoinGroup("private", { banned: false, invited: true }), true);
     assert.equal(canJoinGroup("public", { banned: true, invited: true }), false);
+  });
+});
+
+describe("custom roles", () => {
+  const helpers = { id: "role-helpers", name: "Helpers", color: "#2563eb", permissions: ["MEMBER:MUTE", "MESSAGE:PIN"] as RolePermission[] };
+  const greeters = { id: "role-greeters", name: "Greeters", color: "#db2777", permissions: ["MEMBER:INVITE"] as RolePermission[] };
+  const roles = [helpers, greeters];
+  const plain = { role: "member" as const };
+  const helper = { role: "member" as const, granted: grantedBy([helpers.id], roles) };
+
+  it("grants what the roles held allow, and nothing for unknown roles", () => {
+    assert.deepEqual(grantedBy([helpers.id, greeters.id], roles).sort(), ["MEMBER:INVITE", "MEMBER:MUTE", "MESSAGE:PIN"]);
+    assert.deepEqual(grantedBy(["role-gone"], roles), []);
+    assert.equal(allows(helper, "MESSAGE:PIN"), true);
+    assert.equal(allows(plain, "MESSAGE:PIN"), false);
+    // Ranks still grant what they always did.
+    assert.equal(allows({ role: "moderator" }, "MESSAGE:PIN"), true);
+  });
+
+  it("lets a role act on plain members only", () => {
+    assert.equal(mayActOn(helper, plain, "MEMBER:MUTE"), true);
+    assert.equal(mayActOn(helper, { role: "moderator" }, "MEMBER:MUTE"), false);
+    // Not on someone who holds the same power.
+    assert.equal(mayActOn(helper, helper, "MEMBER:MUTE"), false);
+    // Not with a power the role doesn't grant.
+    assert.equal(mayActOn(helper, plain, "MEMBER:KICK"), false);
+  });
+
+  it("leaves rank rules as they were", () => {
+    assert.equal(mayActOn({ role: "moderator" }, helper, "MEMBER:MUTE"), true);
+    assert.equal(mayActOn({ role: "moderator" }, { role: "moderator" }, "MEMBER:MUTE"), false);
+    assert.equal(mayActOn(undefined, plain, "MEMBER:MUTE"), false);
+  });
+
+  it("is managed and handed out by admins and up", () => {
+    assert.equal(canManageRoles("admin"), true);
+    assert.equal(canManageRoles("moderator"), false);
+    assert.equal(canAssignRoles("admin", "member", false), true);
+    assert.equal(canAssignRoles("admin", "admin", false), false);
+    assert.equal(canAssignRoles("admin", "admin", true), true);
+  });
+
+  it("only offers grantable permissions", () => {
+    assert.equal(isRolePermission("MEMBER:MUTE"), true);
+    assert.equal(isRolePermission("MEMBER:BAN"), false);
+    assert.equal(isRolePermission("ADMINISTRATOR"), false);
   });
 });

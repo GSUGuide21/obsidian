@@ -8,7 +8,7 @@ import type { Attachment, ScheduledMessage } from "../chat/types";
 import { accessOf, channelFor, socketsOf } from "./access.ts";
 import { db } from "./db.ts";
 import { toMessage } from "./messages.ts";
-import { afterPost, announce, filterError, postingError } from "./posting.ts";
+import { afterPost, announce, filterError, postingError, stickerError } from "./posting.ts";
 import { members, type MessageRow } from "./state.ts";
 import { usersByIds } from "./users.ts";
 
@@ -78,7 +78,9 @@ export async function postScheduled(row: ScheduledRow) {
   if (!channel) return "You can no longer post in that channel.";
   const held = await postingError(channel, row.author_id, false, false);
   if (held) return held;
-  const filtered = filterError(channel.groupId, row.author_id, `${row.body}\n${attachmentText(row.attachments)}`);
+  // The sticker may have been taken out of the pack since.
+  const filtered = filterError(channel.groupId, row.author_id, `${row.body}\n${attachmentText(row.attachments)}`) ??
+    stickerError(channel.groupId, row.attachments);
   if (filtered) return filtered;
   const { data, error } = await db.from("messages")
     .insert({ id: randomUUID(), channel_id: channel.id, author_id: row.author_id, body: row.body, attachments: row.attachments })

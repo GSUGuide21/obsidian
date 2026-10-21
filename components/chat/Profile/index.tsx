@@ -19,8 +19,8 @@ export type ProfileDraft = { name: string; color: string; photo: PhotoChoice; bi
 type ProfileFormProps = {
   /** How everyone currently sees this user. */
   user: User;
-  /** Present for signed-in (Google) users. */
-  account?: { email?: string; providerAvatar?: string; photo: PhotoChoice };
+  /** Present for signed-in users; `provider` is how they sign in ("Google", "email"…), when known. */
+  account?: { email?: string; provider?: string; providerAvatar?: string; photo: PhotoChoice };
   onSave: (draft: ProfileDraft) => Promise<void>;
 };
 
@@ -172,7 +172,7 @@ export function ProfileForm({
               onClick={() => setPhoto("default")}
               className="h-8 rounded-lg px-3 text-xs font-medium text-accent-bright hover:bg-surface-2"
             >
-              Use Google photo
+              Use {account.provider ?? "account"} photo
             </button>
           )}
         </div>
@@ -191,7 +191,11 @@ export function ProfileForm({
       <Field
         label="Display name"
         htmlFor="profile-name"
-        hint={account?.email ? `Signed in with Google as ${account.email}` : "You're a guest. Sign in with Google to keep your profile."}
+        hint={
+          account?.email
+            ? `Signed in${account.provider && account.provider !== "email" ? ` with ${account.provider}` : ""} as ${account.email}`
+            : "You're a guest. Sign in to keep your profile."
+        }
       >
         <Input
           id="profile-name"

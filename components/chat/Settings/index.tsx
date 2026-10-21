@@ -1,58 +1,62 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Ban, Bell, Eye, KeyRound, LogOut, MessagesSquare, Monitor, Moon, Palette, Phone, Smile, Sun, UserRound } from "lucide-react";
 import Field from "@/components/form/Field";
+import { LOCALE_NAMES, LOCALES, useT, type MessageKey } from "@/lib/i18n";
+import { isLocale, resolveLocale } from "@/lib/i18n/locales";
 import Radio from "@/components/form/Radio";
 import Select from "@/components/form/Select";
 import Switch from "@/components/form/Switch";
 import Avatar from "@/components/chat/GroupList/Group/Avatar";
 import { ProfileForm, type ProfileDraft } from "@/components/chat/Profile";
+import { PasswordForm } from "@/components/chat/Password";
 import SettingsLayout, { type SettingsGroup } from "@/components/chat/SettingsLayout";
 import { CustomStatus, PRESENCE_LABELS, StatusForm } from "@/components/chat/Status";
 import { useChatContext } from "@/components/chat/Core/ChatContext";
 import type { PhotoChoice } from "@/lib/chat/profile";
 import { usePush } from "@/lib/chat/push";
-import type { Clock, Density, TextSize, Theme } from "@/lib/chat/appearance";
+import { ACCENTS, type Clock, type Density, type TextSize, type Theme } from "@/lib/chat/appearance";
 import { updateSettings, useSettings } from "@/lib/chat/settings";
 import { canLeave, dmName, isDm, type Group, type MemberRole, type NotificationLevel, type User } from "@/lib/chat/types";
 
 export type SettingsSectionId = "profile" | "status" | "appearance" | "notifications" | "calls" | "chats" | "privacy" | "blocked" | "account";
 
+/** Every section under its heading; labels, descriptions and headings are message keys (see lib/i18n). */
 const GROUPS: SettingsGroup<SettingsSectionId>[] = [
   {
-    heading: "You",
+    heading: "settings.group.you",
     sections: [
-      { id: "profile", label: "Profile", description: "How everyone sees you: your name, photo, color and bio.", icon: UserRound },
-      { id: "status", label: "Status", description: "Whether you're around, and what you're up to.", icon: Smile },
+      { id: "profile", label: "settings.profile", description: "settings.profile.description", icon: UserRound },
+      { id: "status", label: "settings.status", description: "settings.status.description", icon: Smile },
     ],
   },
   {
-    heading: "Preferences",
+    heading: "settings.group.preferences",
     sections: [
-      { id: "appearance", label: "Appearance", description: "Light or dark, text size, spacing and the clock.", icon: Palette },
-      { id: "notifications", label: "Notifications", description: "What reaches you, and where.", icon: Bell },
-      { id: "calls", label: "Calls", description: "Your microphone, camera and speaker, and the ringtone.", icon: Phone },
+      { id: "appearance", label: "settings.appearance", description: "settings.appearance.description", icon: Palette },
+      { id: "notifications", label: "settings.notifications", description: "settings.notifications.description", icon: Bell },
+      { id: "calls", label: "settings.calls", description: "settings.calls.description", icon: Phone },
     ],
   },
   {
-    heading: "Chats",
+    heading: "settings.group.chats",
     sections: [
-      { id: "chats", label: "Your groups", description: "The groups in your sidebar, and leaving them.", icon: MessagesSquare },
+      { id: "chats", label: "settings.chats", description: "settings.chats.description", icon: MessagesSquare },
     ],
   },
   {
-    heading: "Privacy & safety",
+    heading: "settings.group.privacy",
     sections: [
-      { id: "privacy", label: "Read receipts", description: "Whether people see how far you've read.", icon: Eye },
-      { id: "blocked", label: "Blocked people", description: "People whose messages you don't see.", icon: Ban },
+      { id: "privacy", label: "settings.privacy", description: "settings.privacy.description", icon: Eye },
+      { id: "blocked", label: "settings.blocked", description: "settings.blocked.description", icon: Ban },
     ],
   },
   {
     // Set apart by a line, rather than titled with its own name again.
     heading: "",
     sections: [
-      { id: "account", label: "Account", description: "How you're signed in, your data, and signing out.", icon: KeyRound },
+      { id: "account", label: "settings.account", description: "settings.account.description", icon: KeyRound },
     ],
   },
 ];
@@ -65,8 +69,8 @@ type SettingsScreenProps = {
   onOpenSidebar: () => void;
   /** Signed-in users (guests can't hide DMs or pick a photo; they have none). */
   signedIn: boolean;
-  /** Present for signed-in (Google) users. */
-  account?: { email?: string; providerAvatar?: string; photo: PhotoChoice };
+  /** Present for signed-in users. */
+  account?: { email?: string; provider?: string; providerAvatar?: string; photo: PhotoChoice };
   onSaveProfile: (draft: ProfileDraft) => Promise<void>;
   onSignOut: () => void;
 };
@@ -86,8 +90,17 @@ export default function SettingsScreen({
   onSignOut,
 }: SettingsScreenProps) {
   const { state } = useChatContext();
+  const t = useT();
   const self: User | undefined = state.users[state.selfId];
   const current = section ?? "profile";
+  const groups = GROUPS.map((group) => ({
+    heading: group.heading && t(group.heading as MessageKey),
+    sections: group.sections.map((item) => ({
+      ...item,
+      label: t(item.label as MessageKey),
+      description: t(item.description as MessageKey),
+    })),
+  }));
 
   let content: ReactNode = null;
   switch (current) {
@@ -110,7 +123,7 @@ export default function SettingsScreen({
       content = <ChatsSettings />;
       break;
     case "privacy":
-      content = <PrivacySettings />;
+      content = <PrivacySettings signedIn={signedIn} />;
       break;
     case "blocked":
       content = <BlockedSettings />;
@@ -118,7 +131,7 @@ export default function SettingsScreen({
     case "account":
       content = (
         <div className="space-y-8">
-          <AccountSettings signedIn={signedIn} email={account?.email} onSignOut={onSignOut} />
+          <AccountSettings signedIn={signedIn} email={account?.email} provider={account?.provider} onSignOut={onSignOut} />
           {signedIn && <DataSettings onDeleted={onSignOut} />}
         </div>
       );
@@ -127,10 +140,10 @@ export default function SettingsScreen({
 
   return (
     <SettingsLayout
-      title="Settings"
+      title={t("settings.title")}
       subtitle={self?.name}
       leading={self && <Avatar name={self.name} color={self.color} src={self.avatarUrl} size="sm" status={self.status} />}
-      groups={GROUPS}
+      groups={groups}
       current={current}
       onSection={onSection}
       onClose={onClose}
@@ -331,38 +344,53 @@ function DataSettings({ onDeleted }: { onDeleted: () => void }) {
 }
 
 /** Read receipts ("Seen by"), on or off for both directions. */
-function PrivacySettings() {
-  const { state, setReadReceipts } = useChatContext();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+/** Read receipts, and whether people can find you (signed-in users; guests aren't listed anyway). */
+function PrivacySettings({ signedIn }: { signedIn: boolean }) {
+  const { state, setReadReceipts, setDiscoverable } = useChatContext();
+  const t = useT();
+  const [busy, setBusy] = useState<"receipts" | "discoverable" | null>(null);
+  const [error, setError] = useState<{ which: "receipts" | "discoverable"; message: string }>();
 
-  async function toggle(on: boolean) {
-    setBusy(true);
+  async function toggle(which: "receipts" | "discoverable", on: boolean) {
+    setBusy(which);
     setError(undefined);
-    setError(await setReadReceipts(on));
-    setBusy(false);
+    const failure = await (which === "receipts" ? setReadReceipts(on) : setDiscoverable(on));
+    if (failure) setError({ which, message: failure });
+    setBusy(null);
   }
+  const errorFor = (which: "receipts" | "discoverable") =>
+    error?.which === which && (
+      <p role="alert" className="text-xs text-danger">
+        {error.message}
+      </p>
+    );
 
   return (
-    <section aria-label="Read receipts">
+    <section aria-label={t("settings.privacy")} className="space-y-3">
       <div className="space-y-1.5 rounded-lg bg-surface-2 px-3 py-2.5">
         <Switch
           checked={state.readReceipts}
-          disabled={busy || state.status !== "ready"}
-          onChange={(on) => void toggle(on)}
+          disabled={busy !== null || state.status !== "ready"}
+          onChange={(on) => void toggle("receipts", on)}
         >
-          Read receipts
+          {t("privacy.readReceipts")}
         </Switch>
-        <p className="text-xs text-muted">
-          Shows &ldquo;Seen by&rdquo; under messages. When it&apos;s off, nobody sees how far you&apos;ve read, and you
-          don&apos;t see anyone else&apos;s either.
-        </p>
-        {error && (
-          <p role="alert" className="text-xs text-danger">
-            {error}
-          </p>
-        )}
+        <p className="text-xs text-muted">{t("privacy.readReceipts.hint")}</p>
+        {errorFor("receipts")}
       </div>
+      {signedIn && (
+        <div className="space-y-1.5 rounded-lg bg-surface-2 px-3 py-2.5">
+          <Switch
+            checked={state.discoverable}
+            disabled={busy !== null || state.status !== "ready"}
+            onChange={(on) => void toggle("discoverable", on)}
+          >
+            {t("privacy.discoverable")}
+          </Switch>
+          <p className="text-xs text-muted">{t("privacy.discoverable.hint")}</p>
+          {errorFor("discoverable")}
+        </div>
+      )}
     </section>
   );
 }
@@ -697,9 +725,13 @@ const CLOCKS: { value: Clock; label: string }[] = [
   { value: "24h", label: "24-hour" },
 ];
 
-/** How the app looks on this device: theme, text size, message spacing and the clock. */
+/** How the app looks on this device: theme, accent color, text size, message spacing and the clock. */
 function AppearanceSettings() {
   const settings = useSettings();
+  const t = useT();
+  const languageId = useId();
+  // What "Automatic" picks here, named in itself.
+  const automatic = LOCALE_NAMES[resolveLocale("auto", typeof navigator === "undefined" ? [] : navigator.languages)];
   // The clock as each choice would show it, e.g. "3:42 PM" or "15:42".
   const sample = (hour12?: boolean) =>
     new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", hour12 }).format(new Date(2026, 0, 1, 15, 42));
@@ -708,10 +740,49 @@ function AppearanceSettings() {
     <section aria-label="Appearance" className="space-y-6">
       <SectionNote>Saved on this device, so each computer or phone can look its own way.</SectionNote>
 
+      <Field label={t("settings.language")} htmlFor={languageId} hint={t("settings.language.hint")}>
+        <Select
+          id={languageId}
+          value={settings.language}
+          onChange={(next) => updateSettings({ language: next === "auto" || isLocale(next) ? next : "auto" })}
+          options={[
+            { value: "auto", label: t("settings.language.auto", { language: automatic }) },
+            ...LOCALES.map((locale) => ({ value: locale, label: LOCALE_NAMES[locale] })),
+          ]}
+        />
+      </Field>
+
       <Choice label="Theme">
         <Radio.Group type="segment" value={settings.theme} onChange={(theme) => updateSettings({ theme })} aria-label="Theme">
           {THEMES.map((option) => (
             <Radio key={option.value} value={option.value} icon={option.icon} className="px-3 py-1.5 text-sm">
+              {option.label}
+            </Radio>
+          ))}
+        </Radio.Group>
+      </Choice>
+
+      <Choice label="Accent color" hint="Buttons, links, highlights and what's selected. Each reads well in both themes.">
+        <Radio.Group
+          type="button"
+          value={settings.accent}
+          onChange={(accent) => updateSettings({ accent })}
+          aria-label="Accent color"
+          className="flex-wrap gap-1.5"
+        >
+          {ACCENTS.map((option) => (
+            <Radio
+              key={option.value}
+              value={option.value}
+              icon={
+                <span
+                  aria-hidden
+                  className="size-4 rounded-full"
+                  style={{ backgroundColor: option.color }}
+                />
+              }
+              className="px-3 py-1.5 text-sm"
+            >
               {option.label}
             </Radio>
           ))}
@@ -778,7 +849,18 @@ function Choice({ label, hint, children }: { label: string; hint?: string; child
 }
 
 /** How you're signed in, and signing out. */
-function AccountSettings({ signedIn, email, onSignOut }: { signedIn: boolean; email?: string; onSignOut: () => void }) {
+function AccountSettings({
+  signedIn,
+  email,
+  provider,
+  onSignOut,
+}: {
+  signedIn: boolean;
+  email?: string;
+  /** How they sign in ("Google", "email"…), when known. */
+  provider?: string;
+  onSignOut: () => void;
+}) {
   const { state } = useChatContext();
   const self = state.users[state.selfId];
   if (!self) return null;
@@ -795,15 +877,20 @@ function AccountSettings({ signedIn, email, onSignOut }: { signedIn: boolean; em
             {self.statusEmoji || self.statusText ? <CustomStatus user={self} /> : PRESENCE_LABELS[state.presence].label}
           </span>
           <span className="block truncate text-xs text-muted">
-            {signedIn ? `Signed in with Google${email ? ` as ${email}` : ""}` : "Guest"}
+            {signedIn ? `Signed in${provider && provider !== "email" ? ` with ${provider}` : ""}${email ? ` as ${email}` : ""}` : "Guest"}
           </span>
         </span>
       </div>
       {!signedIn && (
         <SectionNote>
-          Guests are forgotten when they sign out. Sign in with Google to keep your name, message people directly and
-          upload files.
+          Guests are forgotten when they sign out. Sign in to keep your name, message people directly and upload files.
         </SectionNote>
+      )}
+      {provider === "email" && (
+        <div className="rounded-xl border border-border p-4">
+          <h3 className="mb-3 text-sm font-semibold">Change password</h3>
+          <PasswordForm submitLabel="Change password" />
+        </div>
       )}
       <button type="button" onClick={onSignOut} className={`${button} text-danger`}>
         <LogOut aria-hidden className="size-4" />

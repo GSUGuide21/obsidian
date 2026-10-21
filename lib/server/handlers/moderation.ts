@@ -1,6 +1,6 @@
 // Moderation: reports, blocks and the moderation log.
 
-import { accessOf, allowedIn, canAccess, channelFor, findGroup, socketsOf } from "../access.ts";
+import { accessOf, allowedIn, canAccess, channelAllows, channelFor, findGroup, socketsOf } from "../access.ts";
 import { ID_PATTERN } from "../constants.ts";
 import { db } from "../db.ts";
 import { canReact, canRead } from "../limits.ts";
@@ -19,7 +19,7 @@ import {
   type ModerationRow,
   type ReportRow,
 } from "../moderation.ts";
-import { members, type ChatSocket } from "../state.ts";
+import { channels, members, type ChatSocket } from "../state.ts";
 import { usersByIds } from "../users.ts";
 import { optionalText } from "../validation.ts";
 
@@ -68,7 +68,11 @@ export function registerModerationHandlers(socket: ChatSocket) {
       console.error("report list failed:", error.message);
       return ack(null);
     }
-    const reports = (data as ReportRow[]).map(toReport);
+    // Reports from private channels only reach moderators who can see them.
+    const reports = (data as ReportRow[]).map(toReport).filter((report) => {
+      const channel = channels.get(report.message.subgroupId);
+      return !channel || channelAllows(channel, userId);
+    });
     const ids = new Set<string>();
     for (const report of reports) {
       if (report.reporterId) ids.add(report.reporterId);

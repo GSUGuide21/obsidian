@@ -140,7 +140,7 @@ function SettingsForm({
       <Switch
         checked={guestsAllowed}
         onChange={setGuestsAllowed}
-        description="When off, only people signed in with Google can join. Guests already here stay until they leave."
+        description="When off, only people with an account can join. Guests already here stay until they leave."
       >
         Allow guests
       </Switch>

@@ -11,6 +11,7 @@ import {
   Search as SearchIcon,
   Shield,
   ShieldCheck,
+  Tags,
   UserMinus,
   UserPen,
   UserPlus,
@@ -25,15 +26,14 @@ import Avatar from "@/components/chat/GroupList/Group/Avatar";
 import { useChatContext } from "@/components/chat/Core/ChatContext";
 import type { GroupSettingsSection } from "@/components/chat/Manage";
 import {
+  allows,
+  canAssignRoles,
   canBan,
-  canInvite,
   canLeave,
-  canModerate,
-  canMute,
   canSetRole,
-  canReviewReports,
   canTransfer,
-  canViewModerationLog,
+  mayActOn,
+  memberStanding,
   isMuted,
   isOnline,
   roleOf,
@@ -56,6 +56,8 @@ import User from "./User";
 /** Membership and moderation in the open group. Each resolves to an error message, or undefined on success. */
 export type MemberActions = {
   join: () => Promise<string | undefined>;
+  /** Set exactly which of the group's custom roles they hold. */
+  setRoles: (userId: string, roles: string[]) => Promise<string | undefined>;
   leave: () => Promise<string | undefined>;
   invite: (userId: string) => Promise<string | undefined>;
   revokeInvite: (userId: string) => Promise<string | undefined>;
@@ -110,18 +112,6 @@ const SECTIONS: { role: MemberRole; title: string }[] = [
   { role: "member", title: "Members" },
 ];
 
-/** Whether `actor` can do anything to `target` (so its row opens the member dialog). */
-export function canManage(actor: MemberRole | undefined, actorId: string, target: Member, targetRole: MemberRole) {
-  if (!actor || actorId === target.user.id) return false;
-  return (
-    canModerate(actor, targetRole) ||
-    canMute(actor, targetRole) ||
-    canBan(actor, targetRole) ||
-    canTransfer(actor, actorId, target.user.id) ||
-    ASSIGNABLE_ROLES.some((role) => role !== target.role && canSetRole(actor, targetRole, role))
-  );
-}
-
 export default function Users({ users, group, actions, canUpload, onClose, onMessage, onOpenSettings, className }: UsersProps) {
   const { state } = useChatContext();
   const { selfId } = state;
@@ -143,6 +133,10 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
   const self = users[selfId];
   const selfMember = members?.find((m) => m.user.id === selfId);
   const selfRole = roleOf(members, self, group.kind === "dm");
+  const selfStanding = memberStanding(members, self, group);
+  /** Their standing here (rank and custom roles); unknown people count as plain members. */
+  const standingOf = (member: Member, targetRole: MemberRole) => memberStanding(members, member.user, group) ?? { role: targetRole };
+  const groupRoles = group.kind === "dm" ? [] : (group.roles ?? []);
   // Presence comes from the live user records; member entries are a snapshot.
   const withLive = (member: Member): Member => ({ ...member, user: users[member.user.id] ?? member.user });
   const listed = (members ?? [])
@@ -152,8 +146,8 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
     .sort((a, b) => Number(isOnline(b.user)) - Number(isOnline(a.user)) || a.user.name.localeCompare(b.user.name));
   const managed = managing ? listed.find((m) => m.user.id === managing) : undefined;
   // Nobody moderates direct messages, so they have no log or reports.
-  const showLog = group.kind !== "dm" && canViewModerationLog(selfRole);
-  const showReports = group.kind !== "dm" && canReviewReports(selfRole);
+  const showLog = group.kind !== "dm" && allows(selfStanding, "GROUP:AUDIT");
+  const showReports = group.kind !== "dm" && allows(selfStanding, "MESSAGE:MANAGE");
   const openReports = state.reports[group.id] ?? 0;
 
   async function run(action: Promise<string | undefined>) {
@@ -181,6 +175,9 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
       return [
         profile,
         { label: "Your profile in this group…", icon: <UserPen className="size-4" />, onSelect: () => setEditingProfile(true) },
+        ...(groupRoles.length > 0 && canAssignRoles(selfRole, targetRole, true)
+          ? [{ label: "Your roles…", icon: <Tags className="size-4" />, onSelect: () => setManaging(user.id) }]
+          : []),
         ...(canLeave(member.role) && !oneOnOne
           ? [
               {
@@ -196,8 +193,10 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
     }
     const actor = selfRole;
     const roles = actor ? ASSIGNABLE_ROLES.filter((role) => role !== member.role && canSetRole(actor, targetRole, role)) : [];
-    const moderate = Boolean(actor && canModerate(actor, targetRole));
-    const mute = Boolean(actor && canMute(actor, targetRole));
+    const target = standingOf(member, targetRole);
+    const moderate = mayActOn(selfStanding, target, "MEMBER:KICK");
+    const mute = mayActOn(selfStanding, target, "MEMBER:MUTE");
+    const assignRoles = groupRoles.length > 0 && canAssignRoles(actor, targetRole, false);
     const ban = Boolean(actor && canBan(actor, targetRole));
     const transfer = Boolean(actor && canTransfer(actor, selfId, user.id));
     const moderation: MenuItem[] = [
@@ -206,6 +205,7 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
         icon: <Shield className="size-4" />,
         onSelect: () => void run(actions.setRole(user.id, role)),
       })),
+      ...(assignRoles ? [{ label: "Roles…", icon: <Tags className="size-4" />, onSelect: () => setManaging(user.id) }] : []),
       ...(!mute
         ? []
         : isMuted(member)
@@ -266,6 +266,7 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
         isSelf={member.user.id === selfId}
         muted={isMuted(member)}
         role={withRole && member.role !== "member" ? ROLE_LABELS[member.role] : undefined}
+        customRole={groupRoles.find((r) => member.roles?.includes(r.id))}
         items={menuItems(member, targetRole)}
         onOpen={() => setManaging(member.user.id)}
       />
@@ -297,7 +298,7 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
             </p>
           )}
         </div>
-        {selfRole && canInvite(selfRole) && (
+        {allows(selfStanding, "MEMBER:INVITE") && (
           <button
             type="button"
             onClick={() => onOpenSettings?.("invites")}
@@ -474,6 +475,9 @@ export default function Users({ users, group, actions, canUpload, onClose, onMes
         selfId={selfId}
         selfRole={selfRole}
         groupName={group.name}
+        groupRoles={groupRoles}
+        selfStanding={selfStanding}
+        targetStanding={managed ? standingOf(managed, roleOf(members, managed.user, group.kind === "dm") ?? managed.role) : undefined}
         actions={actions}
         onMessage={
           onMessage && managed && !managed.user.id.startsWith("guest-") && managed.user.role !== "bot"

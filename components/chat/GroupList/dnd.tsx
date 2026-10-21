@@ -4,10 +4,13 @@ import { createContext, useContext, type DragEvent } from "react";
 
 /**
  * What's being dragged in the sidebar: one of your groups (into your own
- * order), or a channel of a group you manage (`groupId`, into the order
- * everyone sees).
+ * order), or a channel or category (by name) of a group you manage
+ * (`groupId`, into the order everyone sees).
  */
-export type DragItem = { kind: "group"; id: string } | { kind: "channel"; id: string; groupId: string };
+export type DragItem =
+  | { kind: "group"; id: string }
+  | { kind: "channel"; id: string; groupId: string }
+  | { kind: "category"; id: string; groupId: string };
 
 /** "before"/"after": the pointer's half of the target; "inside": dropped onto a header. */
 export type DropPosition = "before" | "after" | "inside";
@@ -31,7 +34,7 @@ export function useCanArrange(groupId: string) {
 /** Props that make an element draggable; none when rearranging isn't allowed. */
 export function useDraggable(item: DragItem) {
   const dnd = useContext(SidebarDnd);
-  if (!dnd || (item.kind === "channel" && !dnd.canArrange(item.groupId))) return {};
+  if (!dnd || (item.kind !== "group" && !dnd.canArrange(item.groupId))) return {};
   return {
     draggable: true,
     onDragStart: (event: DragEvent) => {

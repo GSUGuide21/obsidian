@@ -1,16 +1,18 @@
 "use client";
 
 import { Fragment, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { VolumeOff, X } from "lucide-react";
+import { Pencil, VolumeOff, X } from "lucide-react";
 import { useChatContext } from "@/components/chat/Core/ChatContext";
 import { serverCommands } from "@/lib/chat/commands";
-import { authorName, formatDateTime, isSameDay } from "@/lib/chat/format";
+import { authorName, formatDateTime, isSameDay, postTitle } from "@/lib/chat/format";
 import { DEFAULT_BOT_ID } from "@/lib/commands";
-import type { Attachment, Message as MessageType, Subgroup, User } from "@/lib/chat/types";
+import Input from "@/components/form/Input";
+import { cleanTitle, MAX_TITLE_LENGTH, type Attachment, type ForumTag, type Message as MessageType, type Subgroup, type User } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
 import { continuesRun, DayDivider, useUntil, type MessageActions } from "../Chat";
 import Composer from "../Chat/Composer";
 import DeleteDialog from "../Chat/DeleteDialog";
+import { TagPicker } from "../Chat/Forum";
 import Message from "../Chat/Message";
 
 type ThreadProps = {
@@ -32,7 +34,7 @@ type ThreadProps = {
   className?: string;
 };
 
-/** Side panel with a message and the replies in its thread. */
+/** Side panel with a message and the replies in its thread (in a forum: a post and its replies). */
 export default function Thread({
   subgroup,
   rootId,
@@ -65,6 +67,7 @@ export default function Thread({
   const [deleting, setDeleting] = useState<MessageType | null>(null);
   const load = useEffectEvent(onLoad);
   const muted = useUntil(mutedUntil);
+  const isPost = subgroup.type === "forum";
 
   // Load when opened, and reload after reconnecting (replies may have been missed).
   useEffect(() => {
@@ -104,7 +107,7 @@ export default function Thread({
     >
       <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4">
         <div className="min-w-0 flex-1">
-          <h2 className="leading-tight font-semibold">Thread</h2>
+          <h2 className="leading-tight font-semibold">{isPost ? "Post" : "Thread"}</h2>
           <p className="truncate text-xs text-muted">{place ?? `#${subgroup.name}`}</p>
         </div>
         <button
@@ -125,7 +128,7 @@ export default function Thread({
           nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
         role="log"
-        aria-label={rootName ? `Thread on ${rootName}'s message` : "Thread"}
+        aria-label={isPost && root ? postTitle(root) : rootName ? `Thread on ${rootName}'s message` : "Thread"}
         className="flex-1 overflow-y-auto pb-2"
       >
         {root === undefined ? (
@@ -138,6 +141,14 @@ export default function Thread({
           <p className="p-4 text-sm text-muted">This message no longer exists.</p>
         ) : (
           <>
+            {isPost && (
+              <PostHeading
+                key={root.id}
+                post={root}
+                tags={subgroup.tags ?? []}
+                onEdit={root.title && root.authorId === selfId && !root.deleted && !muted ? actions.editPost : undefined}
+              />
+            )}
             <div className="pt-2">
               <Message
                 message={root}
@@ -160,6 +171,7 @@ export default function Thread({
                 onAnswerQuiz={(id, quiz, option) => actions.answerQuiz(subgroup.id, id, quiz, option)}
                 saved={actions.isSaved(root.id)}
                 onSave={actions.save}
+                onLoadHistory={actions.history}
                 emoji={actions.emoji}
                 blocked={actions.isBlocked(root.authorId)}
               />
@@ -197,6 +209,7 @@ export default function Thread({
                     onAnswerQuiz={(id, quiz, option) => actions.answerQuiz(subgroup.id, id, quiz, option)}
                     saved={actions.isSaved(message.id)}
                     onSave={actions.save}
+                    onLoadHistory={actions.history}
                     emoji={actions.emoji}
                     blocked={actions.isBlocked(message.authorId)}
                   />
@@ -228,9 +241,12 @@ export default function Thread({
             canUpload={signedIn}
             draftKey={`thread:${rootId}`}
             gifs={state.gifs}
+            stickers={state.groups.find((g) => g.id === subgroup.groupId)?.stickers}
             onSend={onSend}
             onEditLast={editLast}
             commands={commands}
+            emoji={actions.emoji}
+            channels={group && group.kind !== "dm" ? group.subgroups.map((s) => ({ id: s.id, name: s.name })) : []}
             onPreviewLink={previewLink}
           />
         </div>
@@ -238,5 +254,120 @@ export default function Thread({
 
       <DeleteDialog message={deleting} selfId={selfId} onClose={() => setDeleting(null)} onDelete={actions.remove} />
     </aside>
+  );
+}
+
+/** A forum post's title and tags above it; its author can change them (`onEdit`). */
+function PostHeading({
+  post,
+  tags,
+  onEdit,
+}: {
+  post: MessageType;
+  /** The forum's tags. */
+  tags: ForumTag[];
+  onEdit?: (id: string, text: string, post: { title: string; tags: string[] }) => Promise<string | undefined>;
+}) {
+  const [draft, setDraft] = useState<{ title: string; tags: string[] } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const cleaned = cleanTitle(draft?.title ?? "");
+  // Only the forum's current tags (a removed one isn't shown, and goes when the post is next saved).
+  const current = tags.filter((t) => post.tags?.includes(t.id));
+
+  function cancel() {
+    setDraft(null);
+    setError(undefined);
+  }
+
+  async function save() {
+    if (!onEdit || !draft || !cleaned || saving) return;
+    setSaving(true);
+    const failure = await onEdit(post.id, post.text, { title: cleaned, tags: draft.tags });
+    setSaving(false);
+    setError(failure);
+    if (!failure) setDraft(null);
+  }
+
+  if (draft !== null) {
+    return (
+      <form
+        className="px-4 pt-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <Input
+          autoFocus
+          aria-label="Post title"
+          maxLength={MAX_TITLE_LENGTH}
+          value={draft.title}
+          onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              cancel();
+            }
+          }}
+          className="text-base font-semibold"
+        />
+        {tags.length > 0 && (
+          <TagPicker tags={tags} value={draft.tags} onChange={(next) => setDraft({ ...draft, tags: next })} className="mt-2" />
+        )}
+        {error && (
+          <p role="alert" className="mt-1 text-xs text-danger">
+            {error}
+          </p>
+        )}
+        <div className="mt-2 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={cancel}
+            className="h-8 rounded-lg px-3 text-sm font-medium text-muted hover:bg-surface-2 hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={!cleaned || saving}
+            className="h-8 rounded-lg bg-accent px-3 text-sm font-medium text-accent-foreground hover:opacity-90 disabled:opacity-40"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  return (
+    <div className="group/title px-4 pt-3">
+      <div className="flex items-start gap-2">
+        <h3 className={cn("min-w-0 flex-1 text-lg leading-snug font-bold wrap-break-word", post.deleted && "text-muted italic")}>
+          {postTitle(post)}
+        </h3>
+        {onEdit && (
+          <button
+            type="button"
+            onClick={() => setDraft({ title: post.title ?? "", tags: current.map((t) => t.id) })}
+            aria-label="Edit title and tags"
+            title="Edit title and tags"
+            // Always shown on phones (no hover there).
+            className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-foreground focus-visible:opacity-100 sm:opacity-0 sm:group-hover/title:opacity-100"
+          >
+            <Pencil className="size-4" />
+          </button>
+        )}
+      </div>
+      {current.length > 0 && (
+        <ul aria-label="Tags" className="mt-1.5 flex flex-wrap gap-1">
+          {current.map((t) => (
+            <li key={t.id} className="rounded-full bg-surface-2 px-2 py-px text-[11px] font-medium text-muted">
+              {t.name}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

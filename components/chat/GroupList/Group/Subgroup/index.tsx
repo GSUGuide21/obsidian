@@ -1,6 +1,6 @@
 "use client";
 
-import { BellOff, MicOff, MonitorUp, Settings, Video, Volume2 } from "lucide-react";
+import { BellOff, Lock, MicOff, MonitorUp, Settings, Video, Volume2 } from "lucide-react";
 import ChannelIcon, { channelTypeLabel } from "@/components/chat/ChannelIcon";
 import { useCallContext, useChatContext } from "@/components/chat/Core/ChatContext";
 import type { Call, Subgroup as SubgroupType, User } from "@/lib/chat/types";
@@ -62,6 +62,7 @@ export default function Subgroup({
           onSelect();
           if (voice) joinVoice();
         }}
+        data-channel={subgroup.id}
         aria-current={active ? "page" : undefined}
         title={subgroup.topic ? `${subgroup.name}: ${subgroup.topic}` : undefined}
         {...dragProps}
@@ -80,6 +81,7 @@ export default function Subgroup({
         {active && <span aria-hidden className="absolute inset-y-1.5 -left-2.25 w-0.5 rounded-full bg-accent" />}
         <ChannelIcon type={type} className={cn("size-4", active ? "text-accent-bright" : "opacity-70")} />
         <span className="min-w-0 flex-1 truncate">{subgroup.name}</span>
+        {subgroup.access && <Lock aria-label="Private channel" className="size-3 shrink-0 opacity-70" />}
         {type !== "text" && <span className="sr-only">({channelTypeLabel[type]})</span>}
         {showCount && (
           <span

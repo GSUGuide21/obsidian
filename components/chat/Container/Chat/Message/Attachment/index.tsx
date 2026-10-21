@@ -7,6 +7,7 @@ import Picture from "./Image";
 import Link from "./Link";
 import Poll, { type PollContext } from "./Poll";
 import Quiz, { type QuizContext } from "./Quiz";
+import Sticker from "./Sticker";
 import Video from "./Video";
 import Voice from "./Voice";
 
@@ -51,6 +52,8 @@ export default function Attachment({
       return <Link attachment={attachment} />;
     case "external":
       return <External attachment={attachment} />;
+    case "sticker":
+      return <Sticker attachment={attachment} />;
     case "mention":
     case "reply":
     case "forward":

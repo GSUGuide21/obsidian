@@ -42,6 +42,7 @@ export function toUser(row: MemberRow): User {
     ...(row.avatar_url && { avatarUrl: row.avatar_url }),
     ...(row.bio && { bio: row.bio }),
     ...(row.poster_url && { posterUrl: row.poster_url }),
+    ...(row.kind === "user" && !row.discoverable && { unlisted: true as const }),
   };
 }
 

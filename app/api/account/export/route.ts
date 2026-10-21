@@ -7,8 +7,9 @@ const PAGE = 1000;
 
 /**
  * GET: a signed-in user's data as a JSON download: their member record and
- * profile, group memberships, messages, reactions, poll votes, notification
- * settings, blocks, scheduled messages and uploads. Only their own rows.
+ * profile, group memberships, messages (and the earlier versions of the ones
+ * they edited), reactions, poll votes, notification settings, blocks,
+ * scheduled messages and uploads. Only their own rows.
  */
 export async function GET() {
   // The session cookie is verified, not trusted.
@@ -21,7 +22,7 @@ export async function GET() {
   const own = <T,>(table: string, column = "member_id") =>
     admin.from(table).select("*").eq(column, userId).limit(10_000) as unknown as Promise<{ data: T[] | null }>;
 
-  const [member, profile, memberships, reactions, votes, notifications, blocks, scheduled, uploads] = await Promise.all([
+  const [member, profile, memberships, reactions, votes, notifications, blocks, scheduled, uploads, edits] = await Promise.all([
     admin.from("members").select("id, kind, name, created_at, last_seen_at").eq("id", userId).maybeSingle(),
     admin.from("profiles").select("*").eq("member_id", userId).maybeSingle(),
     own("group_members"),
@@ -31,6 +32,9 @@ export async function GET() {
     own("member_blocks"),
     own("scheduled_messages", "author_id"),
     own("uploads", "owner_id"),
+    // What their edited messages said before (the edits of their own messages only).
+    admin.from("message_edits").select("message_id, body, written_at, replaced_at, messages!inner(author_id)")
+      .eq("messages.author_id", userId).order("id").limit(10_000),
   ]);
 
   // Messages, newest first, a page at a time.
@@ -51,6 +55,12 @@ export async function GET() {
       profile: profile.data,
       memberships: memberships.data ?? [],
       messages,
+      editHistory: (edits.data ?? []).map(({ message_id, body, written_at, replaced_at }) => ({
+        message_id,
+        body,
+        written_at,
+        replaced_at,
+      })),
       reactions: reactions.data ?? [],
       pollVotes: votes.data ?? [],
       notificationSettings: notifications.data ?? [],

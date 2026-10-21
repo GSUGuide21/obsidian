@@ -24,7 +24,7 @@ export async function POST(request: Request) {
   const { data: auth } = await supabase.auth.getClaims();
   const userId = auth?.claims.sub;
   if (!userId) {
-    return Response.json({ error: "Sign in with Google to attach files." }, { status: 401 });
+    return Response.json({ error: "Sign in to attach files." }, { status: 401 });
   }
   if (!allow(userId)) {
     return Response.json({ error: "Too many uploads. Wait a minute and try again." }, { status: 429 });

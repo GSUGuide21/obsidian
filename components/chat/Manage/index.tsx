@@ -5,9 +5,12 @@ import { ArrowDown, ArrowUp, Bot as BotIcon, Check, Globe, Lock, Plus, RefreshCw
 import ChannelIcon from "@/components/chat/ChannelIcon";
 import Avatar from "@/components/chat/GroupList/Group/Avatar";
 import Dialog from "@/components/Dialog";
+import Checkbox from "@/components/form/Checkbox";
 import ColorPicker, { type HEXString } from "@/components/form/Color";
 import Field from "@/components/form/Field";
 import Input from "@/components/form/Input";
+import Listbox from "@/components/form/Listbox";
+import Switch from "@/components/form/Switch";
 import Radio from "@/components/form/Radio";
 import Select from "@/components/form/Select";
 import TextArea from "@/components/form/TextArea";
@@ -16,7 +19,10 @@ import {
   AVATAR_COLORS,
   canManageGroup,
   cleanChannelName,
+  cleanTagName,
   isDm,
+  MAX_FORUM_TAGS,
+  MAX_TAG_NAME_LENGTH,
   MAX_BOTS_PER_GROUP,
   MAX_NAME_LENGTH,
   webhookUrl,
@@ -24,10 +30,13 @@ import {
   type ManagedBot,
   type Webhook,
   MAX_CATEGORY_LENGTH,
+  MAX_CHANNEL_MEMBERS,
   MAX_CHANNEL_NAME_LENGTH,
   MAX_GROUP_DESCRIPTION_LENGTH,
   MAX_GROUP_NAME_LENGTH,
   MAX_TOPIC_LENGTH,
+  DISAPPEAR_TIMES,
+  type ChannelAccess,
   type ChannelDraft,
   type Group,
   type GroupDraft,
@@ -36,7 +45,8 @@ import {
   type SaveResult,
   type Subgroup,
 } from "@/lib/chat/types";
-import { moveChannel, stepChannel, stepGroup, type ChannelMove } from "@/lib/chat/order";
+import { formatDisappear } from "@/lib/chat/format";
+import { categoryOrder, moveChannel, stepChannel, stepGroup, type ChannelMove } from "@/lib/chat/order";
 import {
   cleanBlockedWords,
   formatSlowMode,
@@ -50,11 +60,15 @@ import { cn, readableOn } from "@/lib/utils";
 export type GroupSettingsSection =
   | "about"
   | "notifications"
+  | "disappearing"
   | "you"
   | "overview"
+  | "categories"
   | "words"
   | "emoji"
+  | "stickers"
   | "bots"
+  | "roles"
   | "invites"
   | "bans"
   | "reports"
@@ -763,20 +777,24 @@ export function GroupOverview({ group }: { group: Group }) {
 export function BlockedWordsForm({ group }: { group: Group }) {
   const chat = useChatContext();
   const { loadBlockedWords } = chat;
-  /** One word or phrase per line; `undefined` while loading, `null` if they couldn't be loaded. */
-  const [words, setWords] = useState<string | null>();
-  const [loaded, setLoaded] = useState("");
+  /** The list as edited; `undefined` while loading, `null` if it couldn't be loaded. */
+  const [words, setWords] = useState<string[] | null>();
+  const [loaded, setLoaded] = useState<string[]>([]);
+  // The words picked in the list, to remove.
+  const [selected, setSelected] = useState<string[]>([]);
+  const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [saved, setSaved] = useState(false);
-  const fieldId = useId();
+  const inputId = useId();
+  const listLabelId = useId();
 
   useEffect(() => {
     let active = true;
     void loadBlockedWords(group.id).then((list) => {
       if (!active) return;
-      setWords(list ? list.join("\n") : null);
-      setLoaded(list ? list.join("\n") : "");
+      setWords(list);
+      setLoaded(list ?? []);
     });
     return () => {
       active = false;
@@ -785,24 +803,43 @@ export function BlockedWordsForm({ group }: { group: Group }) {
 
   if (words === undefined) return <p className="text-sm text-muted">Loading…</p>;
   if (words === null) return <p className="text-sm text-muted">Couldn&apos;t load the blocked words.</p>;
+  const list = words;
+
+  const limits = `Up to ${MAX_BLOCKED_WORDS} words or phrases, each up to ${MAX_BLOCKED_WORD_LENGTH} characters.`;
+
+  function change(next: string[]) {
+    setWords(next);
+    setSaved(false);
+    setError(undefined);
+  }
+
+  /** Add what's typed: one word or phrase, or several separated by commas or new lines (e.g. pasted). */
+  function add() {
+    const added = cleanBlockedWords(draft);
+    if (!added?.length) return setError(added === null ? limits : undefined);
+    const next = cleanBlockedWords([...list, ...added]);
+    if (next === null) return setError(limits);
+    change(next);
+    setDraft("");
+  }
+
+  function removeSelected() {
+    if (selected.length === 0) return;
+    change(list.filter((word) => !selected.includes(word)));
+    setSelected([]);
+  }
 
   async function submit() {
-    const cleaned = cleanBlockedWords(words ?? "");
-    if (cleaned === null) {
-      return setError(`Up to ${MAX_BLOCKED_WORDS} words or phrases, each up to ${MAX_BLOCKED_WORD_LENGTH} characters.`);
-    }
     setBusy(true);
     setError(undefined);
     // Saving sends the group as it is, with the new list.
     const result = await chat.saveGroup(
-      { name: group.name, color: group.color, visibility: group.visibility ?? "public", blockedWords: cleaned },
+      { name: group.name, color: group.color, visibility: group.visibility ?? "public", blockedWords: list },
       group.id,
     );
     setBusy(false);
     if (!result.ok) return setError(result.error);
-    const text = cleaned.join("\n");
-    setWords(text);
-    setLoaded(text);
+    setLoaded(list);
     setSaved(true);
   }
 
@@ -816,24 +853,76 @@ export function BlockedWordsForm({ group }: { group: Group }) {
       className="space-y-5"
     >
       <Field
-        label="Blocked words"
-        htmlFor={fieldId}
-        hint="One word or phrase per line. Messages containing them are rejected, and their authors are told why. Only those who manage the group see this list."
+        label="Add a word or phrase"
+        htmlFor={inputId}
+        hint="Messages containing any of these are rejected, and their authors are told why. Only those who manage the group see this list."
       >
-        <TextArea
-          id={fieldId}
-          rows={6}
-          autoResize
-          maxHeight={360}
-          placeholder="spoiler&#10;buy now"
-          value={words}
-          onChange={(event) => {
-            setWords(event.target.value);
-            setSaved(false);
-          }}
-        />
+        <div className="flex gap-2">
+          <Input
+            id={inputId}
+            placeholder="e.g. spoiler, buy now"
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setError(undefined);
+            }}
+            onKeyDown={(event) => {
+              // Enter adds to the list; saving is the Save button's.
+              if (event.key === "Enter") {
+                event.preventDefault();
+                add();
+              }
+            }}
+          />
+          <button
+            type="button"
+            onClick={add}
+            disabled={!draft.trim() || list.length >= MAX_BLOCKED_WORDS}
+            className="inline-flex h-9 shrink-0 items-center gap-1 rounded-lg border border-border px-3 text-sm font-medium transition-colors hover:bg-surface-2 disabled:opacity-40"
+          >
+            <Plus aria-hidden className="size-4" />
+            Add
+          </button>
+        </div>
       </Field>
-      <SaveBar error={error} busy={busy} saved={saved} canSave={words !== loaded} />
+
+      <div>
+        <div className="mb-1.5 flex items-center justify-between gap-2">
+          <span id={listLabelId} className="text-sm font-medium">
+            Blocked words <span className="font-normal text-muted tabular-nums">({list.length}/{MAX_BLOCKED_WORDS})</span>
+          </span>
+          <button
+            type="button"
+            onClick={removeSelected}
+            disabled={selected.length === 0}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted transition-colors hover:bg-surface-2 hover:text-danger disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
+          >
+            <Trash aria-hidden className="size-3.5" />
+            {selected.length > 1 ? `Remove ${selected.length}` : "Remove selected"}
+          </button>
+        </div>
+        {/* Delete or Backspace in the list removes what's selected there. */}
+        <div
+          onKeyDown={(event) => {
+            if (event.key === "Delete" || event.key === "Backspace") {
+              event.preventDefault();
+              removeSelected();
+            }
+          }}
+        >
+          <Listbox
+            multiple
+            aria-labelledby={listLabelId}
+            options={list.map((word) => ({ value: word, label: word }))}
+            value={selected.filter((word) => list.includes(word))}
+            onChange={setSelected}
+            emptyText="No blocked words yet. Add one above."
+          />
+        </div>
+        <p className="mt-1.5 text-xs text-muted">Select words to remove them. Words are matched regardless of case.</p>
+      </div>
+
+      <SaveBar error={error} busy={busy} saved={saved} canSave={list.join("\n") !== loaded.join("\n")} />
     </form>
   );
 }
@@ -883,9 +972,184 @@ export function DeleteGroup({ group, onDeleted }: { group: Group; onDeleted: () 
 const TYPES: { type: GroupType; label: string; description: string }[] = [
   { type: "text", label: "Text", description: "Messages, threads, files and polls." },
   { type: "announcement", label: "Announcement", description: "Only the group's owner and admins post. Everyone can react and reply in threads." },
+  { type: "forum", label: "Forum", description: "Members start posts with a title; each post has its own thread." },
   { type: "wiki", label: "Wiki", description: "A shared page anyone signed in can edit, with a chat tab." },
   { type: "voice", label: "Voice", description: "Drop in to talk. Members see who's in it from the sidebar." },
 ];
+
+/**
+ * Making a channel private, and who it lets in: custom roles, and people by
+ * name. The group's owner, admins, moderators and channel managers always see it.
+ */
+function ChannelPrivacy({
+  group,
+  value,
+  onChange,
+}: {
+  group: Group;
+  value: ChannelAccess | null;
+  onChange: (access: ChannelAccess | null) => void;
+}) {
+  const { state } = useChatContext();
+  const [filter, setFilter] = useState("");
+  const membersId = useId();
+  const roles = group.roles ?? [];
+  // Loaded for the open group (see member:list); people already let in stay listed.
+  const members = state.members[group.id];
+  const needle = filter.trim().toLowerCase();
+  const people = (members ?? [])
+    .filter((m) => m.user.role !== "bot" && m.role === "member")
+    .filter((m) => !needle || m.user.name.toLowerCase().includes(needle) || value?.members.includes(m.user.id));
+
+  return (
+    <fieldset className="space-y-3 rounded-xl border border-border p-3">
+      <Switch
+        checked={value !== null}
+        onChange={(on) => onChange(on ? (value ?? { roles: [], members: [] }) : null)}
+        description="Only the people and roles you pick see it, along with the group's owner, admins, moderators and anyone who manages channels."
+      >
+        Private channel
+      </Switch>
+      {value && (
+        <>
+          {roles.length > 0 && (
+            <div>
+              <p className="mb-1.5 text-sm font-medium">Roles that can see it</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {roles.map((role) => (
+                  <Checkbox
+                    key={role.id}
+                    checked={value.roles.includes(role.id)}
+                    onChange={(on) =>
+                      onChange({ ...value, roles: on ? [...value.roles, role.id] : value.roles.filter((id) => id !== role.id) })
+                    }
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <span aria-hidden className="size-2.5 rounded-full" style={{ backgroundColor: role.color }} />
+                      {role.name}
+                    </span>
+                  </Checkbox>
+                ))}
+              </div>
+            </div>
+          )}
+          <div>
+            <p id={membersId} className="mb-1.5 text-sm font-medium">
+              People who can see it{" "}
+              <span className="font-normal text-muted tabular-nums">
+                ({value.members.length}/{MAX_CHANNEL_MEMBERS})
+              </span>
+            </p>
+            {members === undefined ? (
+              <p className="text-xs text-muted">Open this group to pick people by name.</p>
+            ) : (
+              <>
+                <Input
+                  size="sm"
+                  aria-label="Find people"
+                  placeholder="Find people"
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  className="mb-1.5"
+                />
+                <Listbox
+                  multiple
+                  aria-labelledby={membersId}
+                  options={people.map((m) => ({ value: m.user.id, label: m.user.name }))}
+                  value={value.members}
+                  onChange={(next) => onChange({ ...value, members: next.slice(0, MAX_CHANNEL_MEMBERS) })}
+                  emptyText={needle ? "Nobody by that name." : "Nobody else in the group yet."}
+                />
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </fieldset>
+  );
+}
+
+/** A forum tag being edited: `id` once it's saved; `key` tells rows apart before then. */
+type TagDraft = { key: string; id?: string; name: string };
+
+/** A forum's tags: rename, remove, add (saved with the channel). */
+function TagEditor({ tags, onChange }: { tags: TagDraft[]; onChange: (tags: TagDraft[]) => void }) {
+  const [adding, setAdding] = useState("");
+  const addId = useId();
+  const name = cleanTagName(adding);
+  const taken = tags.some((t) => cleanTagName(t.name).toLowerCase() === name.toLowerCase());
+  const full = tags.length >= MAX_FORUM_TAGS;
+
+  function add() {
+    if (!name || taken || full) return;
+    onChange([...tags, { key: `new-${Date.now()}-${tags.length}`, name }]);
+    setAdding("");
+  }
+
+  return (
+    <fieldset>
+      <legend className="mb-1 text-sm font-medium">Tags</legend>
+      <p className="mb-2 text-xs text-muted">
+        Members pick up to 5 for each post, and filter posts by them. Removing one takes it off every post.
+      </p>
+      {tags.length > 0 && (
+        <ul className="mb-2 space-y-1.5">
+          {tags.map((tag) => (
+            <li key={tag.key} className="flex items-center gap-2">
+              <Input
+                size="sm"
+                aria-label="Tag name"
+                maxLength={MAX_TAG_NAME_LENGTH}
+                value={tag.name}
+                onChange={(event) => onChange(tags.map((t) => (t.key === tag.key ? { ...t, name: event.target.value } : t)))}
+              />
+              <button
+                type="button"
+                onClick={() => onChange(tags.filter((t) => t.key !== tag.key))}
+                aria-label={`Remove the ${tag.name || "unnamed"} tag`}
+                title="Remove tag"
+                className="rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-danger"
+              >
+                <Trash className="size-4" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex items-center gap-2">
+        <label htmlFor={addId} className="sr-only">
+          New tag
+        </label>
+        <Input
+          id={addId}
+          size="sm"
+          maxLength={MAX_TAG_NAME_LENGTH}
+          placeholder={full ? `Up to ${MAX_FORUM_TAGS} tags` : "New tag, e.g. Question"}
+          disabled={full}
+          value={adding}
+          onChange={(event) => setAdding(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter adds the tag rather than saving the channel.
+            if (event.key === "Enter") {
+              event.preventDefault();
+              add();
+            }
+          }}
+        />
+        <button
+          type="button"
+          onClick={add}
+          disabled={!name || taken || full}
+          className="inline-flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border px-3 text-sm font-medium transition-colors hover:bg-surface-2 disabled:opacity-40"
+        >
+          <Plus aria-hidden className="size-4" />
+          Add
+        </button>
+      </div>
+      {name && taken && <p className="mt-1 text-xs text-muted">There&apos;s already a tag called “{name}”.</p>}
+    </fieldset>
+  );
+}
 
 function ChannelForm({
   groupId: initialGroupId,
@@ -907,12 +1171,18 @@ function ChannelForm({
   const [category, setCategory] = useState(channel?.category ?? "");
   const [slowMode, setSlowMode] = useState(channel?.slowMode ?? 0);
   const slowModeId = useId();
+  const [disappearAfter, setDisappearAfter] = useState(channel?.disappearAfter ?? 0);
+  const [tags, setTags] = useState<TagDraft[]>(() => (channel?.tags ?? []).map((t) => ({ key: t.id, id: t.id, name: t.name })));
+  /** Who a private channel lets in; null while it's public. */
+  const [access, setAccess] = useState<ChannelAccess | null>(channel?.access ?? null);
+  const disappearId = useId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [confirming, setConfirming] = useState(false);
   const ids = { name: useId(), topic: useId(), type: useId(), category: useId(), group: useId() };
   const cleaned = cleanChannelName(name);
-  const categories = [...new Set(group?.subgroups.flatMap((s) => (s.category ? [s.category] : [])))];
+  // Empty categories too: a channel can be the first one in.
+  const categories = group ? categoryOrder(group) : [];
 
   if (!group) return <p className="text-sm text-muted">This group no longer exists.</p>;
 
@@ -935,7 +1205,24 @@ function ChannelForm({
     if (!cleaned || !group) return setError("Channel names need at least one letter or number.");
     setBusy(true);
     setError(undefined);
-    const draft = { groupId: group.id, name: cleaned, type, topic: topic.trim(), category: category.trim(), slowMode };
+    const draft = {
+      groupId: group.id,
+      name: cleaned,
+      type,
+      topic: topic.trim(),
+      category: category.trim(),
+      slowMode,
+      disappearAfter,
+      // Sent when it's private, or when it was (making it public); not for a new public channel.
+      ...((access || channel?.access) && { access }),
+      // Only a forum's; another type keeps whatever it had.
+      ...(type === "forum" && {
+        tags: tags.flatMap((t) => {
+          const name = cleanTagName(t.name);
+          return name ? [{ ...(t.id && { id: t.id }), name }] : [];
+        }),
+      }),
+    };
     const result = await onSaveChannel(draft, channel?.id);
     if (!result.ok) {
       setBusy(false);
@@ -1061,6 +1348,32 @@ function ChannelForm({
           }))}
         />
       </Field>
+
+      <Field
+        label="Disappearing messages"
+        htmlFor={disappearId}
+        hint="Messages, with their threads, are deleted for everyone once they're this old. Turning it on applies to messages already here too."
+      >
+        <Select
+          id={disappearId}
+          value={String(disappearAfter)}
+          onChange={(value) => setDisappearAfter(Number(value ?? 0))}
+          options={DISAPPEAR_TIMES.map((seconds) => ({
+            value: String(seconds),
+            label: seconds === 0 ? "Off" : `After ${formatDisappear(seconds)}`,
+          }))}
+        />
+      </Field>
+      {channel && !channel.disappearAfter && disappearAfter > 0 && (
+        <p role="note" className="-mt-2 rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
+          Messages in #{channel.name} older than {formatDisappear(disappearAfter)} will be deleted within a minute of
+          saving, and can&apos;t be brought back.
+        </p>
+      )}
+
+      {group.kind !== "dm" && <ChannelPrivacy group={group} value={access} onChange={setAccess} />}
+
+      {type === "forum" && <TagEditor tags={tags} onChange={setTags} />}
 
       {channel && current && current.type !== "wiki" && <WebhookManager subgroupId={channel.id} />}
 

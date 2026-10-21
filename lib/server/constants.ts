@@ -11,6 +11,17 @@ export const MAX_NAME_LENGTH = 32;
 
 export const MAX_PAGE_LENGTH = 20000;
 
+export const MAX_TITLE_LENGTH = 100;
+
+// Mirror lib/chat/types/groups.ts.
+export const MAX_FORUM_TAGS = 20;
+
+export const MAX_POST_TAGS = 5;
+
+export const MAX_TAG_NAME_LENGTH = 24;
+
+export const FORUM_PAGE = 50;
+
 export const MAX_PINS_PER_CHANNEL = 50;
 
 export const HISTORY_PAGE = 100;
@@ -59,3 +70,9 @@ export const DEFAULT_SETTINGS: ObsidianSettings = { name: "Obsidian", guestsAllo
 export const MAX_SAVED = 500;
 
 export const SAVED_PAGE = 50;
+
+// Mirrors MAX_EDIT_HISTORY in lib/chat/types/messages.ts.
+export const MAX_EDIT_HISTORY = 50;
+
+// How often disappearing messages are swept (ms): they go within a minute of their time.
+export const DISAPPEAR_SWEEP = 60_000;

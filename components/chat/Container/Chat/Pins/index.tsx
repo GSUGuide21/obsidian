@@ -147,7 +147,7 @@ export default function Pins({ pins, users, selfId, connected, onUnpin, onLoad, 
                       </div>
                       <div className="mt-1 line-clamp-4 text-sm wrap-break-word">
                         {message.text ? (
-                          <MarkdownText text={message.text} mentions={[]} users={users} selfId={selfId} />
+                          <MarkdownText text={message.text} mentions={[]} users={users} selfId={selfId} subgroupId={message.subgroupId} />
                         ) : (
                           <p className="text-muted italic">{summarize(message)}</p>
                         )}

@@ -5,17 +5,19 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Webhook } from "../chat/types";
-import { MAX_MESSAGE_LENGTH } from "./constants.ts";
+import { MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH } from "./constants.ts";
 import { db } from "./db.ts";
 import { limiter } from "./limits.ts";
 import { toMessage } from "./messages.ts";
 import { afterPost, announce } from "./posting.ts";
 import { channels, members, type MessageRow } from "./state.ts";
 import { usersByIds } from "./users.ts";
+import { cleanTitle } from "./validation.ts";
 
 // ---------------------------------------------------------------------------
 // Incoming webhooks: POST /api/webhooks/<id>/<token> with {"content": "…"}
-// posts into the webhook's channel as its bot member ("webhook-<id>"). Handled
+// posts into the webhook's channel as its bot member ("webhook-<id>"); in a
+// forum, as a new post titled "title" (else the content's first line). Handled
 // here, before Next.js, because it needs the live chat. Only a hash of the
 // token is stored, compared in constant time.
 // ---------------------------------------------------------------------------
@@ -47,9 +49,11 @@ export async function handleWebhook(req: IncomingMessage, res: ServerResponse) {
   if (!channel) return reply(404, { error: "The webhook's channel no longer exists." });
 
   let content: unknown;
+  let title: unknown;
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     content = parsed.content ?? parsed.text;
+    title = parsed.title;
   } catch {
     return reply(400, { error: 'Send JSON like {"content": "Hello"}.' });
   }
@@ -57,10 +61,13 @@ export async function handleWebhook(req: IncomingMessage, res: ServerResponse) {
   if (!body || body.length > MAX_MESSAGE_LENGTH) {
     return reply(400, { error: `"content" must be 1–${MAX_MESSAGE_LENGTH} characters.` });
   }
+  const postTitle = channel.type === "forum"
+    ? (cleanTitle(title) || cleanTitle(body.split("\n")[0])).slice(0, MAX_TITLE_LENGTH).trim()
+    : null;
   const authorId = `webhook-${id}`;
   if (!members.has(authorId)) await usersByIds([authorId]);
   const { data, error } = await db.from("messages")
-    .insert({ id: randomUUID(), channel_id: channel.id, author_id: authorId, body, attachments: [] })
+    .insert({ id: randomUUID(), channel_id: channel.id, author_id: authorId, body, attachments: [], title: postTitle })
     .select("*").single();
   if (error || !data) {
     console.error("webhook post failed:", error?.message);

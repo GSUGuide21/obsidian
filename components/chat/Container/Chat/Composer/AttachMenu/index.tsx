@@ -1,21 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CalendarDays, ChartBar, Film, ListChecks, Paperclip, Plus } from "lucide-react";
+import { CalendarDays, ChartBar, Film, ListChecks, Paperclip, Plus, Sticker } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type AttachChoice = "file" | "gif" | "poll" | "quiz" | "event";
+export type AttachChoice = "file" | "gif" | "sticker" | "poll" | "quiz" | "event";
 
 /** `label` in the "+" menu; `action` on the toolbar's icon-only buttons. */
 const ITEMS: { choice: AttachChoice; label: string; action: string; icon: typeof Paperclip }[] = [
   { choice: "file", label: "Upload a file", action: "Upload a file", icon: Paperclip },
   { choice: "gif", label: "GIF", action: "Send a GIF", icon: Film },
+  { choice: "sticker", label: "Sticker", action: "Send a sticker", icon: Sticker },
   { choice: "poll", label: "Poll", action: "Create a poll", icon: ChartBar },
   { choice: "quiz", label: "Quiz", action: "Create a quiz", icon: ListChecks },
   { choice: "event", label: "Event", action: "Create an event", icon: CalendarDays },
 ];
 
-const LOCKED_HINT = "Sign in with Google to upload";
+const LOCKED_HINT = "Sign in to upload";
 
 type AttachProps = {
   disabled?: boolean;
@@ -23,17 +24,20 @@ type AttachProps = {
   canUpload: boolean;
   /** GIF search is available on this server. */
   gifs?: boolean;
+  /** The group has a sticker pack. */
+  stickers?: boolean;
   onPick: (choice: AttachChoice) => void;
   className?: string;
 };
 
-const available = (gifs: boolean) => ITEMS.filter((item) => item.choice !== "gif" || gifs);
+const available = (gifs: boolean, stickers: boolean) =>
+  ITEMS.filter((item) => (item.choice !== "gif" || gifs) && (item.choice !== "sticker" || stickers));
 
 /** The toolbar's icon buttons (wide screens): one click each. */
-export function AttachButtons({ disabled, canUpload, gifs = false, onPick, className }: AttachProps) {
+export function AttachButtons({ disabled, canUpload, gifs = false, stickers = false, onPick, className }: AttachProps) {
   return (
     <div role="group" aria-label="Add to your message" className={cn("flex items-center gap-0.5", className)}>
-      {available(gifs).map(({ choice, action, icon: Icon }) => {
+      {available(gifs, stickers).map(({ choice, action, icon: Icon }) => {
         const locked = choice === "file" && !canUpload;
         return (
           <button
@@ -54,8 +58,8 @@ export function AttachButtons({ disabled, canUpload, gifs = false, onPick, class
 }
 
 /** The same choices behind one "+" button (narrow screens). */
-export default function AttachMenu({ disabled, canUpload, gifs = false, onPick, className }: AttachProps) {
-  const items = available(gifs);
+export default function AttachMenu({ disabled, canUpload, gifs = false, stickers = false, onPick, className }: AttachProps) {
+  const items = available(gifs, stickers);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 

@@ -1,18 +1,54 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type DragEvent } from "react";
-import { CircleAlert, FileX, ImagePlus, Loader2, Search, Smile, Trash, X } from "lucide-react";
+import { CircleAlert, FileX, ImagePlus, Loader2, Search, Smile, Sticker, Trash, X } from "lucide-react";
 import Input from "@/components/form/Input";
-import { isEmojiName, MAX_CUSTOM_EMOJI, type CustomEmoji } from "@/lib/chat/types";
+import { isEmojiName, MAX_CUSTOM_EMOJI, MAX_STICKERS, type CustomEmoji } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
 
 /** What the server accepts (it checks again). */
 export const EMOJI_TYPES = ["image/png", "image/gif", "image/webp", "image/jpeg"];
 export const MAX_EMOJI_BYTES = 512 * 1024;
+export const MAX_STICKER_BYTES = 1024 * 1024;
 /** Past this many, the library gets a search box. */
 const SEARCH_FROM = 12;
 
+/**
+ * Custom emoji and stickers go through the same pipeline (upload an image,
+ * name it, add it to the group); they differ in how they're named, how big
+ * they can be and how they show.
+ */
+type Kind = "emoji" | "sticker";
+
+const KINDS = {
+  emoji: {
+    one: "emoji",
+    many: "emoji",
+    max: MAX_CUSTOM_EMOJI,
+    maxBytes: MAX_EMOJI_BYTES,
+    sizeLabel: "512 KB",
+    /** How a name is written: ":party_parrot:". */
+    show: (name: string) => `:${name}:`,
+    emptyIcon: Smile,
+    emptyHint: "Add some above, and members can use them as :name: in messages and as reactions.",
+    removeNote: "Removing one doesn't change messages or reactions that used it; they show its :name: as text instead.",
+  },
+  sticker: {
+    one: "sticker",
+    many: "stickers",
+    max: MAX_STICKERS,
+    maxBytes: MAX_STICKER_BYTES,
+    sizeLabel: "1 MB",
+    show: (name: string) => name,
+    emptyIcon: Sticker,
+    emptyHint: "Add some above, and members can send them from the sticker button under the message box.",
+    removeNote: "Removing one doesn't change messages that already sent it; they keep showing it.",
+  },
+} as const;
+
 type EmojiSettingsProps = {
+  /** "sticker" manages the group's sticker pack instead. */
+  kind?: Kind;
   emoji: CustomEmoji[];
   /** Upload an image; resolves to its URL (rejects with the reason). */
   onUpload: (file: File) => Promise<string>;
@@ -45,21 +81,24 @@ export function emojiNameFrom(fileName: string) {
 }
 
 /** What's wrong with adding this image as `name`, if anything. */
-function problem(pending: Pending, taken: Set<string>) {
+function problem(kind: Kind, pending: Pending, taken: Set<string>) {
+  const copy = KINDS[kind];
   if (!EMOJI_TYPES.includes(pending.file.type)) return "Use a PNG, GIF, WebP or JPEG image.";
-  if (pending.file.size > MAX_EMOJI_BYTES) return "Emoji images can be up to 512 KB.";
+  if (pending.file.size > copy.maxBytes) return `${kind === "emoji" ? "Emoji" : "Sticker"} images can be up to ${copy.sizeLabel}.`;
   if (!isEmojiName(pending.name)) return "Names are 2–32 lowercase letters, numbers or underscores.";
-  if (taken.has(pending.name)) return `:${pending.name}: is already taken.`;
+  if (taken.has(pending.name)) return `${copy.show(pending.name)} is already taken.`;
   return undefined;
 }
 
 /**
- * A group's custom emoji (a group settings section): add several at once by
- * dropping or picking images (each named from its file, editable, previewed
- * as it'll look), and browse, search and remove the ones there are. Changes
- * apply right away.
+ * A group's custom emoji or sticker pack (a group settings section): add
+ * several at once by dropping or picking images (each named from its file,
+ * editable, previewed as it'll look), and browse, search and remove the ones
+ * there are. Changes apply right away.
  */
-export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: EmojiSettingsProps) {
+export default function EmojiSettings({ kind = "emoji", emoji, onUpload, onAdd, onRemove }: EmojiSettingsProps) {
+  const copy = KINDS[kind];
+  const sticker = kind === "sticker";
   const [pending, setPending] = useState<Pending[]>([]);
   const [dragging, setDragging] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -78,12 +117,12 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
   // Free the previews when leaving.
   useEffect(() => () => pendingRef.current.forEach((p) => URL.revokeObjectURL(p.preview)), []);
 
-  const room = MAX_CUSTOM_EMOJI - emoji.length;
+  const room = copy.max - emoji.length;
   const existing = new Set(emoji.map((e) => e.name));
   // A name is taken by an existing emoji, or by another image above it in the list.
   const checked = pending.map((item, index) => {
     const taken = new Set([...existing, ...pending.slice(0, index).map((p) => p.name)]);
-    return { ...item, problem: item.error ?? problem(item, taken) };
+    return { ...item, problem: item.error ?? problem(kind, item, taken) };
   });
   const ready = checked.filter((item) => !item.problem);
   const toAdd = ready.slice(0, Math.max(0, room));
@@ -151,13 +190,14 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
 
   const needle = query.trim().toLowerCase().replace(/^:|:$/g, "");
   const shown = needle ? emoji.filter((e) => e.name.includes(needle)) : emoji;
+  const EmptyIcon = copy.emptyIcon;
 
   return (
     <div className="space-y-8">
       {/* Adding */}
       <section aria-labelledby={`${dropHintId}-title`} className="space-y-3">
         <h3 id={`${dropHintId}-title`} className="sr-only">
-          Add emoji
+          Add {copy.many}
         </h3>
         {room > 0 ? (
           <div
@@ -187,8 +227,9 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
               </button>
             </p>
             <p id={dropHintId} className="text-xs text-muted">
-              PNG, GIF, WebP or JPEG, up to 512 KB each. Square images look best. Each is named after its file; you
-              can change it.
+              PNG, GIF, WebP or JPEG, up to {copy.sizeLabel} each.{" "}
+              {sticker ? "Transparent backgrounds look best." : "Square images look best."} Each is named after its
+              file; you can change it.
             </p>
             <input
               ref={fileRef}
@@ -204,13 +245,13 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
           </div>
         ) : (
           <p className="rounded-xl bg-surface-2 px-4 py-3 text-sm text-muted">
-            This group has all {MAX_CUSTOM_EMOJI} custom emoji it can have. Remove one to add another.
+            This group has all {copy.max} {sticker ? "stickers" : "custom emoji"} it can have. Remove one to add another.
           </p>
         )}
 
         {checked.length > 0 && (
           <div className="rounded-xl border border-border bg-surface">
-            <ul aria-label="Emoji to add" className="divide-y divide-border">
+            <ul aria-label={`${sticker ? "Stickers" : "Emoji"} to add`} className="divide-y divide-border">
               {checked.map((item) => {
                 const inputId = `emoji-name-${item.key}`;
                 const errorId = `${inputId}-error`;
@@ -218,10 +259,15 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
                 const image = item.file.type.startsWith("image/");
                 return (
                   <li key={item.key} className="flex flex-wrap items-center gap-3 p-3 sm:flex-nowrap">
-                    <span className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-surface-2">
+                    <span
+                      className={cn(
+                        "flex shrink-0 items-center justify-center rounded-lg bg-surface-2",
+                        sticker ? "size-16" : "size-12",
+                      )}
+                    >
                       {image ? (
                         // eslint-disable-next-line @next/next/no-img-element -- local preview
-                        <img src={item.preview} alt="" className="size-8 object-contain" />
+                        <img src={item.preview} alt="" className={cn("object-contain", sticker ? "size-14" : "size-8")} />
                       ) : (
                         <FileX aria-label="Not an image" className="size-5 text-muted" />
                       )}
@@ -231,7 +277,7 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
                         Name for {item.file.name}
                       </label>
                       <div className="flex items-center gap-1 font-mono text-sm">
-                        <span aria-hidden className="text-muted">:</span>
+                        {!sticker && <span aria-hidden className="text-muted">:</span>}
                         <Input
                           id={inputId}
                           size="sm"
@@ -243,7 +289,7 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
                           onChange={(event) => rename(item.key, event.target.value)}
                           className="font-mono"
                         />
-                        <span aria-hidden className="text-muted">:</span>
+                        {!sticker && <span aria-hidden className="text-muted">:</span>}
                       </div>
                       {item.problem ? (
                         <p id={errorId} className="mt-1 flex items-start gap-1.5 text-xs text-danger">
@@ -254,18 +300,20 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
                         <p className="mt-1 truncate text-xs text-muted">{item.file.name}</p>
                       )}
                     </div>
-                    {/* How it'll look: in a message, and as a reaction. */}
-                    <div aria-hidden className={cn("hidden shrink-0 items-center gap-2 text-sm", image && "md:flex")}>
-                      <span className="flex items-center gap-1 rounded-lg bg-surface-2 px-2 py-1">
-                        Nice
-                        {/* eslint-disable-next-line @next/next/no-img-element -- local preview */}
-                        <img src={item.preview} alt="" className="inline size-5 object-contain" />
-                      </span>
-                      <span className="flex items-center gap-1 rounded-full border border-accent/50 bg-accent/10 px-2 py-0.5 text-xs">
-                        {/* eslint-disable-next-line @next/next/no-img-element -- local preview */}
-                        <img src={item.preview} alt="" className="size-4 object-contain" />3
-                      </span>
-                    </div>
+                    {/* How it'll look: in a message, and as a reaction (emoji only; a sticker is the preview above). */}
+                    {!sticker && (
+                      <div aria-hidden className={cn("hidden shrink-0 items-center gap-2 text-sm", image && "md:flex")}>
+                        <span className="flex items-center gap-1 rounded-lg bg-surface-2 px-2 py-1">
+                          Nice
+                          {/* eslint-disable-next-line @next/next/no-img-element -- local preview */}
+                          <img src={item.preview} alt="" className="inline size-5 object-contain" />
+                        </span>
+                        <span className="flex items-center gap-1 rounded-full border border-accent/50 bg-accent/10 px-2 py-0.5 text-xs">
+                          {/* eslint-disable-next-line @next/next/no-img-element -- local preview */}
+                          <img src={item.preview} alt="" className="size-4 object-contain" />3
+                        </span>
+                      </div>
+                    )}
                     {item.busy ? (
                       <Loader2 aria-label="Adding" className="size-4 shrink-0 animate-spin text-muted" />
                     ) : (
@@ -306,7 +354,11 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
                   onClick={() => void addAll()}
                   className="h-8 rounded-lg bg-accent px-3 text-xs font-medium text-accent-foreground hover:bg-accent/90 disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted"
                 >
-                  {adding ? "Adding…" : toAdd.length > 0 ? `Add ${toAdd.length} emoji` : "Add emoji"}
+                  {adding
+                    ? "Adding…"
+                    : toAdd.length > 0
+                      ? `Add ${toAdd.length} ${toAdd.length === 1 ? copy.one : copy.many}`
+                      : `Add ${copy.many}`}
                 </button>
               </div>
             </div>
@@ -323,25 +375,25 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
           <div className="flex items-center gap-2 text-xs text-muted">
             <span
               role="meter"
-              aria-label="Custom emoji used"
+              aria-label={sticker ? "Stickers used" : "Custom emoji used"}
               aria-valuemin={0}
-              aria-valuemax={MAX_CUSTOM_EMOJI}
+              aria-valuemax={copy.max}
               aria-valuenow={emoji.length}
               className="h-1.5 w-20 overflow-hidden rounded-full bg-surface-2"
             >
               <span
                 className={cn("block h-full rounded-full", room <= 5 ? "bg-warning" : "bg-accent")}
-                style={{ width: `${(emoji.length / MAX_CUSTOM_EMOJI) * 100}%` }}
+                style={{ width: `${(emoji.length / copy.max) * 100}%` }}
               />
             </span>
             <span className="tabular-nums">
-              {emoji.length} of {MAX_CUSTOM_EMOJI}
+              {emoji.length} of {copy.max}
             </span>
           </div>
           {emoji.length >= SEARCH_FROM && (
             <div className="relative ml-auto w-full sm:w-56">
               <label htmlFor={searchId} className="sr-only">
-                Search emoji
+                Search {copy.many}
               </label>
               <Search aria-hidden className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted" />
               <Input
@@ -349,7 +401,7 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
                 size="sm"
                 type="search"
                 value={query}
-                placeholder="Search emoji"
+                placeholder={`Search ${copy.many}`}
                 onChange={(event) => setQuery(event.target.value)}
                 className="pl-8"
               />
@@ -366,25 +418,35 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
 
         {emoji.length === 0 ? (
           <div className="flex flex-col items-center gap-1.5 rounded-xl bg-surface-2/60 px-4 py-8 text-center">
-            <Smile aria-hidden className="size-6 text-muted" />
-            <p className="text-sm font-medium">No custom emoji yet</p>
-            <p className="max-w-xs text-xs text-muted">
-              Add some above, and members can use them as :name: in messages and as reactions.
-            </p>
+            <EmptyIcon aria-hidden className="size-6 text-muted" />
+            <p className="text-sm font-medium">{sticker ? "No stickers yet" : "No custom emoji yet"}</p>
+            <p className="max-w-xs text-xs text-muted">{copy.emptyHint}</p>
           </div>
         ) : shown.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted">No emoji match “{query.trim()}”.</p>
+          <p className="py-6 text-center text-sm text-muted">
+            No {copy.many} match “{query.trim()}”.
+          </p>
         ) : (
-          <ul className="grid grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] gap-2">
+          <ul
+            className={cn(
+              "grid gap-2",
+              sticker ? "grid-cols-[repeat(auto-fill,minmax(9rem,1fr))]" : "grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))]",
+            )}
+          >
             {shown.map((e) => (
               <li
                 key={e.name}
                 className="group/tile relative flex flex-col items-center gap-2 rounded-xl border border-border bg-surface p-3 pt-4"
               >
                 {removing === e.name ? (
-                  <div className="flex min-h-[4.75rem] w-full flex-col items-center justify-center gap-2 text-center">
+                  <div
+                    className={cn(
+                      "flex w-full flex-col items-center justify-center gap-2 text-center",
+                      sticker ? "min-h-29" : "min-h-19",
+                    )}
+                  >
                     <p className="text-xs">
-                      Remove <span className="font-mono">:{e.name}:</span>?
+                      Remove <span className="font-mono">{copy.show(e.name)}</span>?
                     </p>
                     <div className="flex gap-1.5">
                       <button
@@ -407,15 +469,15 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
                   </div>
                 ) : (
                   <>
-                    {/* eslint-disable-next-line @next/next/no-img-element -- uploaded emoji */}
-                    <img src={e.url} alt="" loading="lazy" className="size-10 object-contain" />
-                    <span className="w-full truncate text-center font-mono text-xs" title={`:${e.name}:`}>
-                      :{e.name}:
+                    {/* eslint-disable-next-line @next/next/no-img-element -- uploaded emoji and stickers */}
+                    <img src={e.url} alt="" loading="lazy" className={cn("object-contain", sticker ? "size-20" : "size-10")} />
+                    <span className="w-full truncate text-center font-mono text-xs" title={copy.show(e.name)}>
+                      {copy.show(e.name)}
                     </span>
                     <button
                       type="button"
                       onClick={() => setRemoving(e.name)}
-                      aria-label={`Remove :${e.name}:`}
+                      aria-label={`Remove ${copy.show(e.name)}`}
                       title="Remove"
                       className="absolute top-1 right-1 rounded-md p-1 text-muted opacity-0 transition-opacity group-hover/tile:opacity-100 hover:bg-surface-2 hover:text-danger focus-visible:opacity-100 pointer-coarse:opacity-100"
                     >
@@ -427,9 +489,7 @@ export default function EmojiSettings({ emoji, onUpload, onAdd, onRemove }: Emoj
             ))}
           </ul>
         )}
-        <p className="text-xs text-muted">
-          Removing one doesn&apos;t change messages or reactions that used it; they show its :name: as text instead.
-        </p>
+        <p className="text-xs text-muted">{copy.removeNote}</p>
       </section>
     </div>
   );

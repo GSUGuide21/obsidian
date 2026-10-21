@@ -38,12 +38,14 @@ export type User = {
   statusUntil?: number;
   /** Avatar background color, one of AVATAR_COLORS. */
   color: string;
-  /** Profile picture (e.g. from Google). Absent for guests. */
+  /** Profile picture (e.g. from their sign-in provider). Absent for guests. */
   avatarUrl?: string;
   /** Cover photo for the user's profile. Absent if not set. */
   posterUrl?: string;
   /** The user's bio. Absent if not set. */
   bio?: string;
+  /** They've asked not to be found by people outside their groups and conversations (see "people:list"). */
+  unlisted?: true;
 };
 
 export function isOnline(user: Pick<User, "status">) {
@@ -75,3 +77,13 @@ export const AVATAR_COLORS = [
 ];
 
 export const MAX_NAME_LENGTH = 32;
+
+/** A page of people you can find (see "people:list"), most recently around first. */
+export type PeoplePage = {
+  users: User[];
+  /** More people match beyond these. */
+  hasMore: boolean;
+};
+
+/** People per "people:list" page. */
+export const PEOPLE_PAGE = 30;

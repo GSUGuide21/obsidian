@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { authorName, formatDateTime, formatTime, setClock, summarize } from "../lib/chat/format.ts";
+import { authorName, formatDateTime, formatTime, postTitle, setClock, summarize } from "../lib/chat/format.ts";
 
 describe("summarize", () => {
   it("uses the text when there is some", () => {
@@ -14,6 +14,27 @@ describe("summarize", () => {
 
   it("says when a message was deleted", () => {
     assert.equal(summarize({ text: "", deleted: true }), "Message deleted");
+  });
+});
+
+describe("postTitle", () => {
+  it("uses the post's title", () => {
+    assert.equal(postTitle({ title: "Release notes", text: "First line" }), "Release notes");
+  });
+
+  it("falls back to the first line for untitled messages", () => {
+    assert.equal(postTitle({ text: "Hello there\nMore text" }), "Hello there");
+    assert.equal(postTitle({ text: "", attachments: [{ type: "event", title: "Launch", startTime: 0 }] }), "Event: Launch");
+  });
+
+  it("shortens long first lines to a title's length", () => {
+    const title = postTitle({ text: "x".repeat(300) });
+    assert.equal(title.length, 100);
+    assert.ok(title.endsWith("…"));
+  });
+
+  it("says when there's nothing to go by", () => {
+    assert.equal(postTitle({ text: "" }), "Untitled post");
   });
 });
 

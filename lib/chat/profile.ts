@@ -22,7 +22,7 @@ export function withGroupProfiles(users: Record<string, User>, members: Member[]
 
 /**
  * Profile photo setting for signed-in users, stored as
- * user_metadata.profile_avatar: "default" (their Google photo), "none", or a URL.
+ * user_metadata.profile_avatar: "default" (the photo from their sign-in provider), "none", or a URL.
  */
 export type PhotoChoice = "default" | "none" | string;
 
@@ -32,7 +32,7 @@ export type Profile = {
   /** The photo actually shown (after applying the choice). */
   avatarUrl?: string;
   photo: PhotoChoice;
-  /** Signed-in users only: the photo from their Google account. */
+  /** Signed-in users only: the photo from the account they sign in with (Google, Facebook…). */
   providerAvatar?: string;
   /** user_metadata.profile_bio. */
   bio?: string;

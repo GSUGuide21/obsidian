@@ -11,7 +11,7 @@ export type Anchoring = {
   side?: "bottom" | "top";
   /** Line up its left edge with the anchor's ("start", default) or its right edge ("end"). */
   align?: "start" | "end";
-  /** As wide as the anchor (select lists). */
+  /** At least as wide as the anchor, wider if its content needs (select lists), up to the window's edge. */
   matchWidth?: boolean;
   /** The tallest it gets. Default 320. */
   maxHeight?: number;
@@ -24,7 +24,7 @@ function place(anchor: HTMLElement, { side = "bottom", align = "start", matchWid
   const enough = Math.min(maxHeight, 160);
   const up = side === "top" ? !(above < enough && below > above) : below < enough && above > below;
   const horizontal: CSSProperties = matchWidth
-    ? { left: rect.left, width: rect.width }
+    ? { left: rect.left, minWidth: rect.width, maxWidth: window.innerWidth - rect.left - MARGIN }
     : align === "end"
       ? { right: Math.max(MARGIN, window.innerWidth - rect.right), maxWidth: rect.right - MARGIN }
       : { left: Math.max(MARGIN, rect.left), maxWidth: window.innerWidth - Math.max(MARGIN, rect.left) - MARGIN };

@@ -9,7 +9,20 @@ import Input from "@/components/form/Input";
 import Select from "@/components/form/Select";
 import Avatar from "@/components/chat/GroupList/Group/Avatar";
 import { formatDateTime } from "@/lib/chat/format";
-import { canBan, canModerate, canMute, canSetRole, canTransfer, isMuted, type Member, type MemberRole } from "@/lib/chat/types";
+import {
+  canAssignRoles,
+  canBan,
+  canSetRole,
+  canTransfer,
+  isMuted,
+  mayActOn,
+  type GroupRole,
+  type Member,
+  type MemberRole,
+  type Standing,
+} from "@/lib/chat/types";
+import Checkbox from "@/components/form/Checkbox";
+import { RoleChip } from "@/components/chat/GroupSettings/Roles";
 import type { MemberActions } from "..";
 
 export const ASSIGNABLE_ROLES = ["admin", "moderator", "member"] as const;
@@ -42,6 +55,11 @@ type MemberDialogProps = {
   selfId: string;
   /** Your role in the group; absent if you haven't joined (then it's a plain profile). */
   selfRole?: MemberRole;
+  /** Your standing (with your custom roles), and theirs. */
+  selfStanding?: Standing;
+  targetStanding?: Standing;
+  /** The group's custom roles, to hand out. */
+  groupRoles?: GroupRole[];
   groupName: string;
   actions: MemberActions;
   /** Message them directly (absent when you can't). Resolves to an error message. */
@@ -66,6 +84,9 @@ function Controls({
   targetRole,
   selfId,
   selfRole,
+  selfStanding,
+  targetStanding,
+  groupRoles = [],
   groupName,
   actions,
   onMessage,
@@ -84,8 +105,12 @@ function Controls({
   const roles = actor
     ? ASSIGNABLE_ROLES.filter((role) => role !== member.role && canSetRole(actor, targetRole, role))
     : [];
-  const moderate = Boolean(actor && canModerate(actor, targetRole));
-  const mute = Boolean(actor && canMute(actor, targetRole));
+  const target = targetStanding ?? { role: targetRole };
+  const moderate = Boolean(actor) && mayActOn(selfStanding, target, "MEMBER:KICK");
+  const mute = Boolean(actor) && mayActOn(selfStanding, target, "MEMBER:MUTE");
+  // Custom roles: admins and up, for themselves or anyone ranked below them.
+  const assignRoles = groupRoles.length > 0 && canAssignRoles(selfRole, targetRole, user.id === selfId);
+  const held = groupRoles.filter((r) => member.roles?.includes(r.id));
   const ban = Boolean(actor && canBan(actor, targetRole));
   const transfer = Boolean(actor && canTransfer(actor, selfId, user.id));
   const muted = isMuted(member);
@@ -120,6 +145,13 @@ function Controls({
               {muted && ` · Muted until ${formatDateTime(member.mutedUntil!)}`}
             </p>
             <CustomStatus user={user} className="mt-0.5 text-xs" />
+            {held.length > 0 && (
+              <p className="mt-1 flex flex-wrap gap-1">
+                {held.map((role) => (
+                  <RoleChip key={role.id} role={role} />
+                ))}
+              </p>
+            )}
           </div>
           {onMessage && user.id !== selfId && (
             <button
@@ -150,6 +182,27 @@ function Controls({
               >
                 Make {ROLE_LABELS[role].toLowerCase()}
               </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {assignRoles && (
+        <section>
+          <h3 className="mb-2 text-sm font-medium">Roles</h3>
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            {groupRoles.map((role) => (
+              <Checkbox
+                key={role.id}
+                disabled={busy}
+                checked={held.some((r) => r.id === role.id)}
+                onChange={(on) => {
+                  const ids = held.map((r) => r.id).filter((id) => id !== role.id);
+                  void run(actions.setRoles(user.id, on ? [...ids, role.id] : ids));
+                }}
+              >
+                <RoleChip role={role} />
+              </Checkbox>
             ))}
           </div>
         </section>

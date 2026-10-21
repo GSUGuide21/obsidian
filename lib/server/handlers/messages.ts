@@ -1,28 +1,32 @@
-// Messages: history, sending (and slash commands), editing, deleting, threads, search, pins, reactions, polls, quizzes, read state, RSVPs, forwarding, scheduling and GIFs.
+// Messages: history, sending (and slash commands), editing (and edit history), deleting, threads, search, pins, reactions, polls, quizzes, read state, RSVPs, forwarding, scheduling and GIFs.
 
 import { randomUUID } from "node:crypto";
 import { attachmentText } from "../../chat/safety.ts";
 import type { Attachment } from "../../chat/types";
+import { isClosed } from "../../chat/types/attachments.ts";
+import { SEARCH_HAS } from "../../chat/types/messages.ts";
 import { customEmojiName } from "../../chat/types/groups.ts";
 import {
   accessByMember,
-  accessOf,
   canAccess,
   channelFor,
   findGroup,
   listedGroups,
   mutedIn,
-  roleIn,
   toChannel,
+  visibleChannels,
 } from "../access.ts";
 import { canCommand, invocationFor, postAnswer, runInvocation, type CommandOutcome } from "../bots.ts";
 import {
   COLLECTION_PAGE,
   COLLECTION_TYPES,
+  FORUM_PAGE,
   HISTORY_PAGE,
   ID_PATTERN,
+  MAX_EDIT_HISTORY,
   MAX_MESSAGE_LENGTH,
   MAX_PINS_PER_CHANNEL,
+  MAX_TITLE_LENGTH,
   MIN_SEARCH_LENGTH,
   SEARCH_PAGE,
   THREAD_PAGE,
@@ -34,7 +38,6 @@ import { canMark, canReact, canRead, canSend } from "../limits.ts";
 import {
   EMOJI,
   hydrate,
-  likePattern,
   loadMessage,
   MAX_REACTIONS_PER_MESSAGE,
   mayPin,
@@ -44,15 +47,16 @@ import {
   toReactions,
 } from "../messages.ts";
 import { logModeration, mayManageMessagesOf, mayRemoveMessage, removeMessage, snapshotOf } from "../moderation.ts";
-import { afterPost, announce, filterError, postingError } from "../posting.ts";
+import { afterPost, announce, filterError, postingError, stickerError } from "../posting.ts";
 import { canPreview, previewFor } from "../previews.ts";
 import { saveReminders } from "../reminders.ts";
+import { forumFilter, likePattern, parseForumCursor, searchWords } from "../search.ts";
 import { MAX_SCHEDULE_AHEAD, MAX_SCHEDULED, toScheduled, type ScheduledRow } from "../scheduled.ts";
 import { emptyPage, io } from "../sockets.ts";
 import { channels, latest, members, sharesReads, type ChatSocket, type MessageRow } from "../state.ts";
 import { postSystem } from "../system.ts";
 import { usersByIds, usersFor } from "../users.ts";
-import { compact, MAX_ATTACHMENTS, num, sanitizeAttachment, sanitizeAttachments } from "../validation.ts";
+import { cleanTitle, compact, postTags, MAX_ATTACHMENTS, num, sanitizeAttachment, sanitizeAttachments } from "../validation.ts";
 
 export function registerMessagesHandlers(socket: ChatSocket) {
   socket.on("history", async (payload, ack) => {
@@ -86,6 +90,40 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     ack({ messages: page, users: await usersFor(page), hasMore: rows.length > HISTORY_PAGE });
   });
 
+  socket.on("forum:posts", async (payload, ack) => {
+    if (typeof ack !== "function") return;
+    const empty = { messages: [], users: [], hasMore: false };
+    const channelId = typeof payload?.subgroupId === "string" ? payload.subgroupId : "";
+    if (channelFor(channelId, socket.data.userId)?.type !== "forum" || !canRead(socket.id)) return ack(empty);
+
+    // Newest first by activity (active_at: posted, or its latest reply) or posting time; ids break ties.
+    const column = payload.sort === "newest" ? "created_at" : "active_at";
+    let query = db.from("messages").select("*").eq("channel_id", channelId).is("thread_id", null).is("system", null)
+      .order(column, { ascending: false }).order("id", { ascending: false })
+      .limit(FORUM_PAGE + 1);
+    if (typeof payload.tag === "string" && payload.tag.length <= 32) query = query.contains("tags", [payload.tag]);
+    // Every word in the title or the text, and keyset pagination past the previous page, as one filter.
+    const text = typeof payload.query === "string" ? payload.query.trim().slice(0, 200) : "";
+    const filter = forumFilter(column, searchWords(text), parseForumCursor(payload.cursor));
+    if (filter) query = query.or(filter);
+
+    const { data, error } = await query;
+    if (error) {
+      console.error("forum query failed:", error.message);
+      return ack(empty);
+    }
+    const rows = data as MessageRow[];
+    const shown = rows.slice(0, FORUM_PAGE);
+    const last = shown.at(-1);
+    const page = await hydrate(shown.map(toMessage), socket.data.userId);
+    ack({
+      messages: page,
+      users: await usersFor(page),
+      hasMore: rows.length > FORUM_PAGE,
+      ...(last && { cursor: `${last[column]}|${last.id}`, boundary: Date.parse(last[column]) }),
+    });
+  });
+
   socket.on("messages:lookup", async (payload, ack) => {
     if (typeof ack !== "function") return;
     const channelId = typeof payload?.subgroupId === "string" ? payload.subgroupId : "";
@@ -114,7 +152,15 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     // Thread replies: the root must be a live, top-level message in this channel.
     const threadId =
       typeof payload.threadId === "string" && ID_PATTERN.test(payload.threadId) ? payload.threadId : null;
-    const held = await postingError(channel, userId, Boolean(threadId));
+    // A forum's top-level messages are posts, each with a title and maybe tags (ignored anywhere else).
+    const posting = channel.type === "forum" && !threadId;
+    const title = posting ? cleanTitle(payload.title) : "";
+    const tags = posting ? postTags(payload.tags, channel.tags) : null;
+    if (posting && !title) return ack({ ok: false, error: "Give your post a title." });
+    if (title.length > MAX_TITLE_LENGTH) {
+      return ack({ ok: false, error: `Titles are limited to ${MAX_TITLE_LENGTH} characters.` });
+    }
+    const held = await postingError(channel, userId, Boolean(threadId || title));
     if (held) return ack({ ok: false, error: held });
     let root: MessageRow | null = null;
     if (threadId) {
@@ -130,8 +176,9 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     }
     const attachments = sanitizeAttachments(payload.attachments);
     if (typeof attachments === "string") return ack({ ok: false, error: attachments });
-    // The word filter reads what's written in polls, events and captions too.
-    const filtered = filterError(channel.groupId, userId, `${body}\n${attachmentText(attachments)}`);
+    // The word filter reads what's written in titles, polls, events and captions too.
+    const filtered = filterError(channel.groupId, userId, `${title}\n${body}\n${attachmentText(attachments)}`) ??
+      stickerError(channel.groupId, attachments);
     if (filtered) return ack({ ok: false, error: filtered });
     // Mentions and replies decorate a message; they can't be the whole message.
     if (!body && !attachments.some((a) => a.type !== "mention" && a.type !== "reply")) {
@@ -171,7 +218,7 @@ export function registerMessagesHandlers(socket: ChatSocket) {
 
     const insert = () =>
       db.from("messages")
-        .insert({ id, channel_id: channelId, author_id: userId, body, attachments, thread_id: threadId })
+        .insert({ id, channel_id: channelId, author_id: userId, body, attachments, thread_id: threadId, title: title || null, tags })
         .select("*").single();
     let { data, error } = await insert();
     if (error?.code === "23505") {
@@ -214,16 +261,47 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     if (mutedIn(channel.groupId, userId)) return ack({ ok: false, error: "You can't edit messages while you're muted." });
     const hasContent = (row.attachments ?? []).some((a) => a.type !== "mention" && a.type !== "reply");
     if (!body && !hasContent) return ack({ ok: false, error: "A message can't be empty. Delete it instead." });
-    const filtered = body !== row.body ? filterError(channel.groupId, userId, body) : undefined;
+    // Forum posts can be renamed; a title given for anything else is ignored.
+    const title = row.title && payload.title !== undefined ? cleanTitle(payload.title) : row.title;
+    if (row.title && !title) return ack({ ok: false, error: "Posts need a title." });
+    if (title && title.length > MAX_TITLE_LENGTH) {
+      return ack({ ok: false, error: `Titles are limited to ${MAX_TITLE_LENGTH} characters.` });
+    }
+    // Posts can be retagged too (any top-level message in a forum is listed as one).
+    const isPost = channel.type === "forum" && !row.thread_id;
+    const tags = isPost && payload.tags !== undefined ? postTags(payload.tags, channel.tags) : row.tags;
+    const retagged = (tags ?? []).join() !== (row.tags ?? []).join();
+    const filtered = (body !== row.body ? filterError(channel.groupId, userId, body) : undefined) ??
+      (title !== row.title ? filterError(channel.groupId, userId, title ?? "") : undefined);
     if (filtered) return ack({ ok: false, error: filtered });
 
-    if (body !== row.body) {
+    // A rename or retag alone isn't an edit of the text: it keeps no earlier version and no "edited" mark.
+    if ((title !== row.title || retagged) && body === row.body) {
       const { data, error } = await db.from("messages")
-        .update({ body, edited_at: new Date().toISOString() })
+        .update({ title, tags }).eq("id", id).eq("author_id", userId).is("deleted_at", null)
+        .select("*").single();
+      if (error || !data) {
+        console.error("post update failed:", error?.message);
+        return ack({ ok: false, error: "Couldn't update your post. Try again." });
+      }
+      Object.assign(row, data);
+    } else if (body !== row.body) {
+      // Keep the text it's replacing, with when that was written, for "message:history".
+      const { data: kept, error: historyError } = await db.from("message_edits")
+        .insert({ message_id: id, body: row.body, written_at: row.edited_at ?? row.created_at })
+        .select("id").single();
+      if (historyError || !kept) {
+        console.error("saving edit history failed:", historyError?.message);
+        return ack({ ok: false, error: "Couldn't save your edit. Try again." });
+      }
+      const { data, error } = await db.from("messages")
+        .update({ body, title, tags, edited_at: new Date().toISOString() })
         .eq("id", id).eq("author_id", userId).is("deleted_at", null)
         .select("*").single();
       if (error || !data) {
         console.error("message edit failed:", error?.message);
+        // The text wasn't replaced after all: it isn't an earlier version.
+        await db.from("message_edits").delete().eq("id", kept.id);
         return ack({ ok: false, error: "Couldn't save your edit. Try again." });
       }
       Object.assign(row, data);
@@ -232,6 +310,25 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     if (latest.get(message.subgroupId)?.id === id) latest.set(message.subgroupId, message);
     toChannel(message.subgroupId).emit("message:update", message);
     ack({ ok: true, message });
+  });
+
+  socket.on("message:history", async (payload, ack) => {
+    if (typeof ack !== "function") return;
+    const id = typeof payload?.id === "string" && ID_PATTERN.test(payload.id) ? payload.id : "";
+    if (!id || !canRead(socket.id)) return ack(null);
+    const row = await loadMessage(id);
+    if (!row || row.deleted_at || !channelFor(row.channel_id, socket.data.userId)) return ack(null);
+    if (!row.edited_at) return ack([{ text: row.body, at: Date.parse(row.created_at) }]);
+    const { data, error } = await db.from("message_edits").select("body, written_at")
+      .eq("message_id", id).order("id", { ascending: false }).limit(MAX_EDIT_HISTORY);
+    if (error) {
+      console.error("edit history query failed:", error.message);
+      return ack(null);
+    }
+    ack([
+      ...data.reverse().map((edit) => ({ text: edit.body, at: Date.parse(edit.written_at) })),
+      { text: row.body, at: Date.parse(row.edited_at) },
+    ]);
   });
 
   socket.on("event:update", async (payload, ack) => {
@@ -345,7 +442,7 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     const kind = payload?.kind;
     const types = typeof kind === "string" && Object.hasOwn(COLLECTION_TYPES, kind) ? COLLECTION_TYPES[kind] : null;
     if (!types || !group || !canAccess(group, socket.data.userId) || !canRead(socket.id)) return ack(empty);
-    const channelIds = group.subgroups.map((s) => s.id);
+    const channelIds = visibleChannels(group, socket.data.userId).map((s) => s.id);
     if (channelIds.length === 0) return ack(empty);
 
     // One containment query per attachment type (served by the GIN index), merged newest first.
@@ -374,8 +471,18 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     const userId = socket.data.userId;
     if (!userId || !canRead(socket.id)) return ack(empty);
     const query = typeof payload?.query === "string" ? payload.query.trim() : "";
-    if (query.length < MIN_SEARCH_LENGTH || query.length > 200) return ack(empty);
-    const words = [...new Set(query.toLowerCase().split(/\s+/))].slice(0, 8);
+    if (query.length > 200) return ack(empty);
+    const words = searchWords(query);
+    // Filters (parsed in the browser: see lib/chat/searchQuery.ts).
+    const authorIds = Array.isArray(payload.authorIds)
+      ? payload.authorIds.filter((id): id is string => typeof id === "string" && id.length <= 128).slice(0, 20)
+      : [];
+    const has = Array.isArray(payload.has) ? SEARCH_HAS.filter((kind) => payload.has!.includes(kind)) : [];
+    const since = num(payload.since);
+    const until = num(payload.until);
+    const filtered = authorIds.length > 0 || has.length > 0 || since !== undefined || until !== undefined;
+    // Words need some length; a filter alone is enough to search by.
+    if (query.length < MIN_SEARCH_LENGTH && !filtered) return ack(empty);
 
     // One channel, one group, or everything you're in (your groups and direct messages).
     let channelIds: string[];
@@ -384,7 +491,7 @@ export function registerMessagesHandlers(socket: ChatSocket) {
       channelIds = channel ? [channel.id] : [];
     } else if (typeof payload.groupId === "string") {
       const group = findGroup(payload.groupId);
-      channelIds = group && canAccess(group, userId) ? group.subgroups.map((s) => s.id) : [];
+      channelIds = group && canAccess(group, userId) ? visibleChannels(group, userId).map((s) => s.id) : [];
     } else {
       channelIds = listedGroups(userId).filter((g) => g.role).flatMap((g) => g.subgroups.map((s) => s.id));
     }
@@ -393,6 +500,13 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     let search = db.from("messages").select("*").in("channel_id", channelIds)
       .is("deleted_at", null).is("system", null);
     for (const word of words) search = search.ilike("body", likePattern(word));
+    if (authorIds.length > 0) search = search.in("author_id", authorIds);
+    for (const kind of has) {
+      // A link is in the text (its card is added later, and not always).
+      search = kind === "link" ? search.ilike("body", "%://%") : search.contains("attachments", [{ type: kind }]);
+    }
+    if (since !== undefined) search = search.gte("created_at", new Date(since).toISOString());
+    if (until !== undefined) search = search.lt("created_at", new Date(until).toISOString());
     // Keyset pagination past the `before` message, as in "history".
     const before = typeof payload.before === "string" && ID_PATTERN.test(payload.before) ? payload.before : null;
     if (before) {
@@ -431,7 +545,7 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     if (typeof ack !== "function") return;
     const userId = socket.data.userId;
     if (!userId) return ack({ ok: false, error: "You're not signed in." });
-    if (members.get(userId)?.kind === "guest") return ack({ ok: false, error: "Sign in with Google to pin messages." });
+    if (members.get(userId)?.kind === "guest") return ack({ ok: false, error: "Sign in to pin messages." });
     if (!canReact(userId)) return ack({ ok: false, error: "Slow down a little and try again." });
 
     const id = typeof payload?.id === "string" && ID_PATTERN.test(payload.id) ? payload.id : "";
@@ -538,13 +652,25 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     if (option !== null && (option < 0 || option >= poll.options.length)) {
       return ack({ ok: false, error: "That isn't one of the options." });
     }
+    if (isClosed(poll)) return ack({ ok: false, error: "This poll has closed." });
 
-    const { error } = option === null
-      ? await db.from("poll_votes").delete().eq("message_id", id).eq("poll_index", pollIndex).eq("member_id", userId)
-      : await db.from("poll_votes").upsert({ message_id: id, poll_index: pollIndex, member_id: userId, option_index: option });
+    // In one transaction (see cast_poll_vote), so quick votes can't interleave or go past the limit.
+    // Adding a choice again (a retry) changes nothing.
+    const { data: refused, error } = await db.rpc("cast_poll_vote", {
+      p_message_id: id,
+      p_poll_index: pollIndex,
+      p_member_id: userId,
+      p_option: option,
+      p_chosen: !(poll.multiple && payload.chosen === false),
+      p_single: !poll.multiple,
+      p_max: poll.maxChoices ?? null,
+    });
     if (error) {
       console.error("vote failed:", error.message);
       return ack({ ok: false, error: "Couldn't record your vote. Try again." });
+    }
+    if (refused === "limit") {
+      return ack({ ok: false, error: `You can pick up to ${poll.maxChoices}. Take one back to choose another.` });
     }
     const { data: votes } = await db.from("poll_votes")
       .select("poll_index, member_id, option_index").eq("message_id", id);
@@ -612,7 +738,7 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     if (typeof payload?.groupId === "string") {
       const group = findGroup(payload.groupId);
       if (!group || !canAccess(group, userId)) return ack({ ok: false, error: "That group no longer exists." });
-      channelIds = group.subgroups.map((s) => s.id);
+      channelIds = visibleChannels(group, userId).map((s) => s.id);
     } else {
       channelIds = listedGroups(userId).filter((g) => g.role).flatMap((g) => g.subgroups.map((s) => s.id));
     }
@@ -674,6 +800,7 @@ export function registerMessagesHandlers(socket: ChatSocket) {
       return ack({ ok: false, error: "That quiz no longer exists." });
     }
     if (option < 0 || option >= quiz.options.length) return ack({ ok: false, error: "That isn't one of the options." });
+    if (isClosed(quiz)) return ack({ ok: false, error: "This quiz has closed." });
     const correct = quiz.options.indexOf(quiz.correctAnswer ?? "");
     if (correct < 0) return ack({ ok: false, error: "This quiz can't be answered." });
 
@@ -797,7 +924,8 @@ export function registerMessagesHandlers(socket: ChatSocket) {
     const attachments = sanitized.filter((a) => a.type !== "reply");
     if (!body && !attachments.some((a) => a.type !== "mention")) return ack({ ok: false, error: "Messages can't be empty." });
     const held = (await postingError(channel, userId, false, false)) ??
-      filterError(channel.groupId, userId, `${body}\n${attachmentText(attachments)}`);
+      filterError(channel.groupId, userId, `${body}\n${attachmentText(attachments)}`) ??
+      stickerError(channel.groupId, attachments);
     if (held) return ack({ ok: false, error: held });
     const { count } = await db.from("scheduled_messages").select("id", { count: "exact", head: true })
       .eq("author_id", userId).is("sent_at", null);

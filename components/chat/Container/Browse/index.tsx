@@ -146,7 +146,7 @@ export default function Browse({ group, activeId, users, actions, onOpen, onClos
                                 votes: message.pollVotes?.[index],
                                 selfId,
                                 users,
-                                onVote: (option) => actions.vote(message.id, index, option),
+                                onVote: (option, chosen) => actions.vote(message.id, index, option, chosen),
                               }
                             : undefined
                         }

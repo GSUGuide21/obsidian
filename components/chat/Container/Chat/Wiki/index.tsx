@@ -5,8 +5,11 @@ import { BookOpen, Pencil, RotateCcw } from "lucide-react";
 import TextArea from "@/components/form/TextArea";
 import { authorName, formatRelative } from "@/lib/chat/format";
 import { MAX_PAGE_LENGTH, type Subgroup, type User, type WikiPage, type WikiSaveResult } from "@/lib/chat/types";
+import type { LinkableChannel } from "@/lib/chat/channelLinks";
+import { richEditBlocker } from "@/lib/chat/wikiMarkdown";
 import { cn } from "@/lib/utils";
 import MarkdownText from "../Message/Markdown";
+import WikiEditor from "./Editor";
 
 type WikiProps = {
   subgroup: Subgroup;
@@ -19,13 +22,29 @@ type WikiProps = {
   connected: boolean;
   onLoad: () => void;
   onSave: (body: string, baseVersion: number) => Promise<WikiSaveResult>;
+  /** The group's custom emoji (name → image URL), shown as :name: and offered while editing. */
+  emoji?: Record<string, string>;
+  /** The group's channels you can see: "#name" links to them, and editing suggests them. */
+  channels?: LinkableChannel[];
 };
 
-/** `original` is the page text editing started from. */
-type Draft = { body: string; original: string; baseVersion: number; preview: boolean };
+/** How the draft is shown: as rich text, as its Markdown, or as the page will look. */
+type Mode = "rich" | "markdown" | "preview";
 
-/** The shared page of a wiki channel: read it, or edit it as Markdown. */
-export default function Wiki({ subgroup, page, users, selfId, canEdit, connected, onLoad, onSave }: WikiProps) {
+/**
+ * `original` is the page text editing started from. `editorKey` changes each
+ * time the rich editor opens, so it reads the latest Markdown again.
+ */
+type Draft = { body: string; original: string; baseVersion: number; mode: Mode; editorKey: number };
+
+const MODES: { mode: Mode; label: string }[] = [
+  { mode: "rich", label: "Rich text" },
+  { mode: "markdown", label: "Markdown" },
+  { mode: "preview", label: "Preview" },
+];
+
+/** The shared page of a wiki channel: read it, or edit it as rich text or Markdown (it's kept as Markdown). */
+export default function Wiki({ subgroup, page, users, selfId, canEdit, connected, onLoad, onSave, emoji, channels }: WikiProps) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
@@ -51,6 +70,8 @@ export default function Wiki({ subgroup, page, users, selfId, canEdit, connected
   }
 
   const dirty = draft !== null && draft.body !== draft.original;
+  // What would keep the rich editor from showing the draft, if anything.
+  const blocker = draft ? richEditBlocker(draft.body) : undefined;
   // While saving, our own save's broadcast can arrive before its reply.
   const stale = draft !== null && !saving && page.version !== draft.baseVersion;
   const editor = page.updatedBy ? authorName(users[page.updatedBy], page.updatedBy) : undefined;
@@ -58,7 +79,9 @@ export default function Wiki({ subgroup, page, users, selfId, canEdit, connected
   function startEditing() {
     if (!page) return;
     setError(undefined);
-    setDraft({ body: page.body, original: page.body, baseVersion: page.version, preview: false });
+    // Pages with Markdown the rich editor can't show open as Markdown.
+    const mode = richEditBlocker(page.body) ? "markdown" : "rich";
+    setDraft({ body: page.body, original: page.body, baseVersion: page.version, mode, editorKey: Date.now() });
   }
 
   async function save() {
@@ -79,26 +102,34 @@ export default function Wiki({ subgroup, page, users, selfId, canEdit, connected
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-2">
           <div role="tablist" aria-label="Editor mode" className="flex rounded-lg bg-surface-2 p-0.5 text-xs font-medium">
-            {(["Write", "Preview"] as const).map((mode) => {
-              const selected = (mode === "Preview") === draft.preview;
+            {MODES.map(({ mode, label }) => {
+              const selected = draft.mode === mode;
+              // The rich editor would drop what it can't show; such pages stay in Markdown.
+              const unavailable = mode === "rich" && !selected && blocker !== undefined;
               return (
                 <button
                   key={mode}
                   type="button"
                   role="tab"
                   aria-selected={selected}
-                  onClick={() => setDraft({ ...draft, preview: mode === "Preview" })}
+                  disabled={unavailable}
+                  title={unavailable ? `The page has ${blocker}, which only Markdown can edit` : undefined}
+                  onClick={() =>
+                    setDraft({ ...draft, mode, ...(mode === "rich" && draft.mode !== "rich" && { editorKey: Date.now() }) })
+                  }
                   className={cn(
-                    "rounded-md px-3 py-1 transition-colors",
-                    selected ? "bg-surface text-foreground shadow-sm" : "text-muted hover:text-foreground",
+                    "rounded-md px-3 py-1 transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                    selected ? "bg-surface text-foreground shadow-sm" : "text-muted enabled:hover:text-foreground",
                   )}
                 >
-                  {mode}
+                  {label}
                 </button>
               );
             })}
           </div>
-          <span className="text-xs text-muted">Markdown supported</span>
+          {draft.mode !== "rich" && blocker && (
+            <span className="text-xs text-muted">Has {blocker}: edit it as Markdown</span>
+          )}
           <span
             className={cn(
               "ml-auto text-xs tabular-nums",
@@ -126,11 +157,24 @@ export default function Wiki({ subgroup, page, users, selfId, canEdit, connected
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {draft.preview ? (
+        <div className={cn("min-h-0 flex-1", draft.mode === "rich" ? "flex flex-col" : "overflow-y-auto")}>
+          {draft.mode === "rich" ? (
+            <WikiEditor
+              key={draft.editorKey}
+              initial={draft.body}
+              disabled={saving}
+              onChange={(body) => setDraft((current) => current && { ...current, body })}
+              emoji={emoji}
+              channels={channels}
+              onSave={() => void save()}
+              onEscape={() => {
+                if (!dirty) setDraft(null);
+              }}
+            />
+          ) : draft.mode === "preview" ? (
             <article className="mx-auto max-w-3xl px-6 py-8">
               {draft.body.trim() ? (
-                <MarkdownText text={draft.body} mentions={[]} users={users} selfId={selfId} variant="page" />
+                <MarkdownText text={draft.body} mentions={[]} users={users} selfId={selfId} variant="page" emoji={emoji} subgroupId={subgroup.id} />
               ) : (
                 <p className="text-sm text-muted italic">Nothing to preview yet.</p>
               )}
@@ -217,7 +261,7 @@ export default function Wiki({ subgroup, page, users, selfId, canEdit, connected
 
         {page.body ? (
           <article>
-            <MarkdownText text={page.body} mentions={[]} users={users} selfId={selfId} variant="page" />
+            <MarkdownText text={page.body} mentions={[]} users={users} selfId={selfId} variant="page" emoji={emoji} subgroupId={subgroup.id} />
           </article>
         ) : (
           <div className="flex flex-col items-center rounded-2xl border border-dashed border-border px-6 py-14 text-center">
@@ -228,7 +272,7 @@ export default function Wiki({ subgroup, page, users, selfId, canEdit, connected
             <p className="mt-1 max-w-sm text-sm text-muted">
               {canEdit
                 ? "Write a shared page for this channel: notes, guides, decisions. Anyone signed in can edit it."
-                : "Sign in with Google to write this page."}
+                : "Sign in to write this page."}
             </p>
             {canEdit && (
               <button

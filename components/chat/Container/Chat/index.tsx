@@ -18,6 +18,7 @@ import {
   AtSign,
   Bookmark,
   Ellipsis,
+  Hourglass,
   Info,
   LayoutGrid,
   Megaphone,
@@ -33,7 +34,7 @@ import { CallBar, CallButtons } from "@/components/chat/Call";
 import ChannelIcon, { channelTypeLabel } from "@/components/chat/ChannelIcon";
 import { useChatContext } from "@/components/chat/Core/ChatContext";
 import { serverCommands } from "@/lib/chat/commands";
-import { authorName, formatDateTime, formatDay, formatTime, isSameDay } from "@/lib/chat/format";
+import { authorName, formatDateTime, formatDay, formatDisappear, formatTime, isSameDay } from "@/lib/chat/format";
 import { DEFAULT_BOT_ID } from "@/lib/commands";
 import { formatSlowMode } from "@/lib/chat/safety";
 import type {
@@ -41,14 +42,18 @@ import type {
   EventAttachment,
   Group,
   Message as MessageType,
+  MessageVersion,
   Subgroup,
   User,
 } from "@/lib/chat/types";
 import type { ChatMessage } from "@/lib/chat/useChat";
+import { useUntil } from "@/lib/hooks/useUntil";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { Menu as ActionMenu } from "@/components/Menu";
 import Composer, { type ComposerHandle } from "./Composer";
 import DeleteDialog from "./DeleteDialog";
+import Forum from "./Forum";
 import Message from "./Message";
 import Pins from "./Pins";
 import Scheduled from "./Scheduled";
@@ -56,26 +61,19 @@ import Wiki from "./Wiki";
 
 const GROUP_WINDOW = 5 * 60 * 1000;
 
-/** Whether `time` (ms) is still in the future; re-renders when it passes. */
-export function useUntil(time: number | undefined) {
-  const [passed, setPassed] = useState<number>();
-  useEffect(() => {
-    if (time === undefined) return;
-    // setTimeout overflows past ~24.8 days; long mutes just end on a later render.
-    const timer = setTimeout(() => setPassed(time), Math.min(Math.max(time - Date.now(), 0), 2 ** 31 - 1));
-    return () => clearTimeout(timer);
-  }, [time]);
-  return time !== undefined && passed !== time;
-}
+export { useUntil };
 
 /** Each resolves to an error message, or undefined on success. */
 export type MessageActions = {
   edit: (id: string, text: string) => Promise<string | undefined>;
+  /** Retitle or retag your forum post (`text` is its text, unchanged). */
+  editPost: (id: string, text: string, post: { title: string; tags: string[] }) => Promise<string | undefined>;
   /** Replace the event at `index` in the message. */
   editEvent: (id: string, index: number, event: EventAttachment) => Promise<string | undefined>;
   remove: (id: string) => Promise<string | undefined>;
   react: (id: string, emoji: string) => Promise<string | undefined>;
-  vote: (id: string, poll: number, option: number | null) => Promise<string | undefined>;
+  /** Vote for `option` (`null` withdraws); `chosen: false` takes one choice back in a multiple-choice poll. */
+  vote: (id: string, poll: number, option: number | null, chosen?: boolean) => Promise<string | undefined>;
   pin: (id: string, pinned: boolean) => Promise<string | undefined>;
   /** Whether you can delete someone else's message (moderators and up, for members below them). */
   canRemove: (authorId: string) => boolean;
@@ -97,6 +95,8 @@ export type MessageActions = {
   markUnread: (subgroupId: string, id: string) => Promise<string | undefined>;
   /** The open group's custom emoji (name → image URL). */
   emoji?: Record<string, string>;
+  /** Every version of an edited message's text, oldest first; `undefined` if it couldn't be loaded. */
+  history: (id: string) => Promise<MessageVersion[] | undefined>;
 };
 
 type ChatProps = {
@@ -181,6 +181,7 @@ export default function Chat({
   notifyMenu,
 }: ChatProps) {
   const chat = useChatContext();
+  const t = useT();
   const { state, retry: onRetry, lookup } = chat;
   const { selfId, references } = state;
   const connected = state.status === "ready";
@@ -220,13 +221,47 @@ export default function Chat({
       : undefined;
   const editingId = editing?.subgroupId === subgroup.id ? editing.id : null;
   const isWiki = subgroup.type === "wiki";
+  // A forum lists its posts instead of a chat; each post's conversation is its thread.
+  const isForum = subgroup.type === "forum";
   const view = isWiki ? (tab?.subgroupId === subgroup.id ? tab.tab : "page") : "chat";
   const muted = useUntil(mutedUntil);
   const readOnly = muted || (subgroup.type === "announcement" && !canAnnounce);
-  const acceptsFiles = view === "chat" && !readOnly;
+  const acceptsFiles = view === "chat" && !readOnly && !isForum;
+  const mutedNotice = (
+    <p className="flex items-center gap-3 rounded-xl border border-border bg-surface-2 px-4 py-3 text-sm text-muted">
+      <VolumeOff aria-hidden className="size-4 shrink-0" />
+      <span>
+        You&apos;re muted in {group.name} until{" "}
+        <span className="font-medium text-foreground">{formatDateTime(mutedUntil!)}</span>.
+      </span>
+    </p>
+  );
+  // Under the composer: the channel's disappearing timer and slow mode.
+  const composerHint =
+    subgroup.slowMode || subgroup.disappearAfter ? (
+      <span className="inline-flex items-center gap-3">
+        {subgroup.disappearAfter !== undefined && subgroup.disappearAfter > 0 && (
+          <span className="inline-flex items-center gap-1" title="Messages here are deleted for everyone once they're this old">
+            <Hourglass aria-hidden className="size-3.5" />
+            Disappearing: {formatDisappear(subgroup.disappearAfter)}
+          </span>
+        )}
+        {subgroup.slowMode !== undefined && subgroup.slowMode > 0 && (
+          <span className="inline-flex items-center gap-1" title="Moderators aren't limited">
+            <Timer aria-hidden className="size-3.5" />
+            Slow mode: {formatSlowMode(subgroup.slowMode)}
+          </span>
+        )}
+      </span>
+    ) : undefined;
   const loaded = useMemo(() => new Set(messages?.map((m) => m.id)), [messages]);
   const defaultBot = users[DEFAULT_BOT_ID]?.name;
   const commands = useMemo(() => serverCommands(group, defaultBot), [group, defaultBot]);
+  // "#channel" suggestions: the group's channels (the ones you can see), not in direct messages.
+  const linkable = useMemo(
+    () => (group.kind === "dm" ? [] : group.subgroups.map((s) => ({ id: s.id, name: s.name }))),
+    [group],
+  );
 
   const hasFiles = (event: DragEvent) => acceptsFiles && event.dataTransfer.types.includes("Files");
 
@@ -353,8 +388,8 @@ export default function Chat({
             type="button"
             onClick={onSearch}
             aria-pressed={searching}
-            aria-label="Search messages"
-            title="Search"
+            aria-label={t("chat.search")}
+            title={t("chat.searchTitle")}
             className={cn(headerButton, "max-md:hidden", searching && pressed)}
           >
             <SearchIcon className="size-5" />
@@ -363,8 +398,8 @@ export default function Chat({
             type="button"
             onClick={onSaved}
             aria-pressed={savedOpen}
-            aria-label="Saved messages"
-            title="Saved messages"
+            aria-label={t("chat.saved")}
+            title={t("chat.saved")}
             className={cn(headerButton, "max-md:hidden", savedOpen && pressed)}
           >
             <Bookmark className="size-5" />
@@ -384,8 +419,8 @@ export default function Chat({
             <button
               type="button"
               onClick={onOpenSettings}
-              aria-label="Chat settings"
-              title="Chat settings"
+              aria-label={t("chat.settings")}
+              title={t("chat.settings")}
               className={cn(headerButton, "max-md:hidden")}
             >
               <Settings className="size-5" />
@@ -393,24 +428,24 @@ export default function Chat({
           )}
           <span className="md:hidden">
             <ActionMenu
-              label="More for this chat"
+              label={t("chat.more")}
               align="end"
               className="w-60"
               items={[
-                { label: searching ? "Close search" : "Search messages", icon: <SearchIcon className="size-4" />, onSelect: onSearch },
-                { label: savedOpen ? "Close saved messages" : "Saved messages", icon: <Bookmark className="size-4" />, onSelect: onSaved },
+                { label: searching ? t("search.close") : t("chat.search"), icon: <SearchIcon className="size-4" />, onSelect: onSearch },
+                { label: savedOpen ? t("chat.closeSaved") : t("chat.saved"), icon: <Bookmark className="size-4" />, onSelect: onSaved },
                 {
-                  label: browsing ? "Close browsing" : "Browse",
-                  description: "Events, polls, quizzes, media, files",
+                  label: browsing ? t("chat.closeBrowse") : t("chat.browse"),
+                  description: t("chat.browseHint"),
                   icon: <LayoutGrid className="size-4" />,
                   onSelect: onBrowse,
                 },
                 ...(onOpenSettings
-                  ? [{ label: "Chat settings", icon: <Settings className="size-4" />, onSelect: onOpenSettings }]
+                  ? [{ label: t("chat.settings"), icon: <Settings className="size-4" />, onSelect: onOpenSettings }]
                   : []),
               ]}
               trigger={(props) => (
-                <button type="button" {...props} aria-label="More for this chat" title="More" className={cn(headerButton, "aria-expanded:bg-surface-2")}>
+                <button type="button" {...props} aria-label={t("chat.more")} title={t("chat.more")} className={cn(headerButton, "aria-expanded:bg-surface-2")}>
                   <Ellipsis className="size-5" />
                 </button>
               )}
@@ -421,7 +456,7 @@ export default function Chat({
             type="button"
             onClick={onToggleUsers}
             aria-pressed={usersOpen}
-            aria-label={`Members: ${onlineCount} online`}
+            aria-label={t.plural("chat.members", onlineCount)}
             title="Members"
             // The side panel only shows on wide screens (smaller ones open it as a drawer).
             className={cn(headerButton, "gap-1.5 pr-2.5 text-xs font-medium tabular-nums", usersOpen && "lg:bg-surface-2 lg:text-foreground")}
@@ -445,7 +480,7 @@ export default function Chat({
       )}
       {!connected && (
         <p role="status" className="border-b border-border bg-surface-2 px-4 py-1.5 text-xs text-muted">
-          Reconnecting… Messages you send now will need a retry.
+          {t("chat.reconnecting")}
         </p>
       )}
 
@@ -460,6 +495,43 @@ export default function Chat({
           connected={connected}
           onLoad={onLoadWiki}
           onSave={onSaveWiki}
+          emoji={actions.emoji}
+          channels={linkable}
+        />
+      ) : isForum ? (
+        <Forum
+          key={subgroup.id}
+          subgroup={subgroup}
+          posts={messages}
+          users={users}
+          connected={connected}
+          openThreadId={openThreadId}
+          readOnly={muted ? mutedNotice : undefined}
+          onOpen={onOpenThread}
+          onLoad={(query, cursor) => chat.loadPosts(id, query, cursor)}
+          onRetry={onRetry}
+          renderComposer={({ title, tags }, onSent) => (
+            <Composer
+              ref={composerRef}
+              gifs={state.gifs}
+              stickers={group.stickers}
+              label={t("chat.writePost", { channel: subgroup.name })}
+              users={users}
+              selfId={selfId}
+              canUpload={signedIn}
+              held={title ? undefined : t("chat.needsTitle")}
+              hint={composerHint}
+              draftKey={`forum:${subgroup.id}`}
+              onSend={(text, attachments, options) => {
+                chat.send(id, text, attachments, undefined, { ...options, title, tags });
+                onSent();
+              }}
+              commands={commands}
+              emoji={actions.emoji}
+              channels={linkable}
+              onPreviewLink={chat.previewLink}
+            />
+          )}
         />
       ) : (
         <>
@@ -496,13 +568,7 @@ export default function Chat({
                   <TypingIndicator names={typingNames} />
                 </div>
                 {muted ? (
-                  <p className="flex items-center gap-3 rounded-xl border border-border bg-surface-2 px-4 py-3 text-sm text-muted">
-                    <VolumeOff aria-hidden className="size-4 shrink-0" />
-                    <span>
-                      You&apos;re muted in {group.name} until{" "}
-                      <span className="font-medium text-foreground">{formatDateTime(mutedUntil!)}</span>.
-                    </span>
-                  </p>
+                  mutedNotice
                 ) : (
                   <p className="flex items-center gap-3 rounded-xl border border-border bg-surface-2 px-4 py-3 text-sm text-muted">
                     <Megaphone aria-hidden className="size-4 shrink-0" />
@@ -521,27 +587,23 @@ export default function Chat({
                 key={subgroup.id}
                 ref={composerRef}
                 gifs={state.gifs}
+                stickers={group.stickers}
                 onSchedule={(text, attachments, sendAt) => chat.scheduleMessage(id, text, attachments, sendAt)}
-                label={direct ? `Message ${direct.title}` : `Message #${subgroup.name}`}
+                label={direct ? t("chat.messageDm", { name: direct.title }) : t("chat.message", { channel: subgroup.name })}
                 users={users}
                 selfId={selfId}
                 replyTo={replyTo}
                 canUpload={signedIn}
                 status={<TypingIndicator names={typingNames} />}
-                hint={
-                  subgroup.slowMode ? (
-                    <span className="inline-flex items-center gap-1" title="Moderators aren't limited">
-                      <Timer aria-hidden className="size-3.5" />
-                      Slow mode: {formatSlowMode(subgroup.slowMode)}
-                    </span>
-                  ) : undefined
-                }
+                hint={composerHint}
                 draftKey={subgroup.id}
                 onCancelReply={() => setReply(null)}
                 onSend={onSend}
                 onTyping={onTyping}
                 onEditLast={editLast}
                 commands={commands}
+                emoji={actions.emoji}
+                channels={linkable}
                 onPreviewLink={chat.previewLink}
               />
               </>
@@ -556,7 +618,7 @@ export default function Chat({
           className="pointer-events-none absolute inset-2 z-30 flex flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-accent bg-background/85 text-sm font-medium"
         >
           <Upload className="size-8 text-accent-bright" />
-          {signedIn ? `Drop files to attach them to #${subgroup.name}` : "Sign in with Google to attach files"}
+          {signedIn ? `Drop files to attach them to #${subgroup.name}` : "Sign in to attach files"}
         </div>
       )}
     </main>
@@ -868,6 +930,7 @@ function MessageList({
                     onAnswerQuiz={(id, quiz, option) => actions.answerQuiz(subgroup.id, id, quiz, option)}
                     saved={actions.isSaved(message.id)}
                     onSave={actions.save}
+                    onLoadHistory={actions.history}
                     onMarkUnread={(id) => actions.markUnread(subgroup.id, id)}
                     emoji={actions.emoji}
                     blocked={actions.isBlocked(message.authorId)}
@@ -1023,10 +1086,11 @@ function MessagesSkeleton() {
 }
 
 export function TypingIndicator({ names }: { names: string[] }) {
+  const t = useT();
   let text = "";
-  if (names.length === 1) text = `${names[0]} is typing`;
-  else if (names.length === 2) text = `${names[0]} and ${names[1]} are typing`;
-  else if (names.length > 2) text = "Several people are typing";
+  if (names.length === 1) text = t("chat.typing.one", { name: names[0] });
+  else if (names.length === 2) text = t("chat.typing.two", { first: names[0], second: names[1] });
+  else if (names.length > 2) text = t("chat.typing.many");
 
   return (
     <p aria-live="polite" className="flex h-6 min-w-0 items-center gap-1.5 text-xs text-muted">

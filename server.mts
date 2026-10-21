@@ -6,6 +6,8 @@
 import { port, production } from "./lib/server/env.ts";
 import { createServer } from "node:http";
 import next from "next";
+import { DISAPPEAR_SWEEP } from "./lib/server/constants.ts";
+import { sweepExpired } from "./lib/server/disappearing.ts";
 import { sendDueReminders } from "./lib/server/reminders.ts";
 import { sendDueScheduled } from "./lib/server/scheduled.ts";
 import { io } from "./lib/server/sockets.ts";
@@ -35,6 +37,7 @@ Promise.all([app.prepare(), loadState()])
   .then(() => {
     setInterval(() => void sendDueReminders(), 30_000);
     setInterval(() => void sendDueScheduled(), 15_000);
+    setInterval(() => void sweepExpired(), DISAPPEAR_SWEEP);
     httpServer.listen(port, () => {
       console.log(
         `> Obsidian Chat ready on http://localhost:${port} (${production ? "production" : "development"}, ${channels.size} channels)`,

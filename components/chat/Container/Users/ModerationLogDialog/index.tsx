@@ -8,6 +8,9 @@ import {
   Crown,
   Flag,
   FolderInput,
+  FolderMinus,
+  FolderPen,
+  FolderPlus,
   Hash,
   Link,
   Link2Off,
@@ -18,6 +21,7 @@ import {
   Shield,
   ShieldCheck,
   Smile,
+  Sticker,
   Tag,
   Tags,
   Trash,
@@ -31,7 +35,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { channelTypeLabel } from "@/components/chat/ChannelIcon";
-import { authorName, formatDateTime, formatEventWhen, formatRelative, summarize } from "@/lib/chat/format";
+import { authorName, formatDateTime, formatDisappear, formatEventWhen, formatRelative, summarize } from "@/lib/chat/format";
 import { formatSlowMode } from "@/lib/chat/safety";
 import {
   ROLE_PERMISSION_LABELS,
@@ -76,6 +80,9 @@ const ICONS: Record<ModerationAction, LucideIcon> = {
   channel_update: Pencil,
   channel_delete: Trash2,
   channel_move: FolderInput,
+  category_create: FolderPlus,
+  category_rename: FolderPen,
+  category_delete: FolderMinus,
   group_update: Settings,
   invite_link_create: Link,
   invite_link_revoke: Link2Off,
@@ -86,6 +93,8 @@ const ICONS: Record<ModerationAction, LucideIcon> = {
   bot_remove: Bot,
   emoji_add: Smile,
   emoji_remove: Smile,
+  sticker_add: Sticker,
+  sticker_remove: Sticker,
   role_create: Tag,
   role_update: Tag,
   role_delete: Tag,
@@ -268,6 +277,12 @@ function sentence(entry: ModerationEntry, nameOf: (id: string | undefined) => st
       }
       return <>{actor} moved {channel} to {entry.to.category ? <Name>{entry.to.category}</Name> : "no category"}</>;
     }
+    case "category_create":
+      return <>{actor} made the category <Name>{entry.name}</Name></>;
+    case "category_rename":
+      return <>{actor} renamed the category <Name>{entry.from}</Name> to <Name>{entry.to}</Name></>;
+    case "category_delete":
+      return <>{actor} deleted the category <Name>{entry.name}</Name></>;
     case "group_update":
       return <>{actor} changed the group&apos;s settings</>;
     case "invite_link_create":
@@ -291,6 +306,15 @@ function sentence(entry: ModerationEntry, nameOf: (id: string | undefined) => st
           {actor} {entry.action === "emoji_add" ? "added" : "removed"} the emoji{" "}
           {/* eslint-disable-next-line @next/next/no-img-element -- uploaded emoji */}
           <img src={entry.url} alt="" className="inline size-4 align-text-bottom" /> <Name>:{entry.name}:</Name>
+        </>
+      );
+    case "sticker_add":
+    case "sticker_remove":
+      return (
+        <>
+          {actor} {entry.action === "sticker_add" ? "added" : "removed"} the sticker{" "}
+          {/* eslint-disable-next-line @next/next/no-img-element -- uploaded sticker */}
+          <img src={entry.url} alt="" className="inline size-6 align-text-bottom" /> <Name>{entry.name}</Name>
         </>
       );
     case "role_create":
@@ -340,6 +364,18 @@ function channelChanges(before: ChannelSnapshot, after: ChannelSnapshot) {
       after: after.slowMode ? formatSlowMode(after.slowMode) : "Off",
       same: (before.slowMode ?? 0) === (after.slowMode ?? 0),
     },
+    {
+      label: "Disappearing messages",
+      before: before.disappearAfter ? `After ${formatDisappear(before.disappearAfter)}` : "Off",
+      after: after.disappearAfter ? `After ${formatDisappear(after.disappearAfter)}` : "Off",
+      same: (before.disappearAfter ?? 0) === (after.disappearAfter ?? 0),
+    },
+    {
+      label: "Tags",
+      before: before.tags?.join(", "),
+      after: after.tags?.join(", "),
+      same: (before.tags ?? []).join("\n") === (after.tags ?? []).join("\n"),
+    },
   ];
 }
 
@@ -383,12 +419,14 @@ function groupChanges(before: GroupSnapshot, after: GroupSnapshot) {
   ];
 }
 
-/** A channel's type, category and topic, as it was. */
+/** A channel's type, category, topic and settings, as it was. */
 function ChannelFacts({ channel, extra }: { channel: ChannelSnapshot; extra?: string }) {
   const facts = [
     channelTypeLabel[channel.type],
     channel.category && `in ${channel.category}`,
     channel.topic && `Topic: ${channel.topic}`,
+    channel.disappearAfter && `Messages disappear after ${formatDisappear(channel.disappearAfter)}`,
+    channel.tags?.length && `Tags: ${channel.tags.join(", ")}`,
     extra,
   ].filter(Boolean);
   return <p className="mt-0.5 text-xs wrap-break-word text-muted">{facts.join(" · ")}</p>;
@@ -465,6 +503,12 @@ function Details({ entry, nameOf }: { entry: ModerationEntry; nameOf: (id: strin
           {entry.to.category && ` (${entry.to.category})`}
         </p>
       );
+    case "category_delete":
+      return entry.channelCount > 0 ? (
+        <p className="mt-0.5 text-xs text-muted">
+          Its {entry.channelCount} {entry.channelCount === 1 ? "channel" : "channels"} moved to no category
+        </p>
+      ) : null;
     case "group_update":
       return <Changes rows={groupChanges(entry.before, entry.after)} />;
     case "invite_link_create":

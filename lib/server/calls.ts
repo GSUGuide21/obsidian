@@ -3,7 +3,7 @@
 // path with their extension, and `import type` only from lib/chat/types.
 
 import type { Call, CallCandidate, CallDescription } from "../chat/types";
-import { groupRoom } from "./access.ts";
+import { roomFor } from "./access.ts";
 import { limiter } from "./limits.ts";
 import { io } from "./sockets.ts";
 import type { ChatSocket } from "./state.ts";
@@ -41,7 +41,7 @@ export function callIn(channelId: string) {
 
 /** Everyone who can see the call's channel gets its new state. */
 export function publishCall(call: Call) {
-  io.to(groupRoom(call.groupId)).emit("call:update", call);
+  io.to(roomFor(call.subgroupId)).emit("call:update", call);
 }
 
 export function endCall(call: Call) {
@@ -49,7 +49,7 @@ export function endCall(call: Call) {
   clearTimeout(ringTimers.get(call.id));
   ringTimers.delete(call.id);
   for (const p of call.participants) callOfSocket.delete(p.socketId);
-  io.to(groupRoom(call.groupId)).emit("call:end", { callId: call.id, subgroupId: call.subgroupId });
+  io.to(roomFor(call.subgroupId)).emit("call:end", { callId: call.id, subgroupId: call.subgroupId });
 }
 
 /** Nobody but the caller ever answered: there's no call to keep. */

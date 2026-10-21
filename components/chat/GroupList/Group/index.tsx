@@ -1,7 +1,8 @@
-import { ChevronDown, ChevronRight, Lock, Plus, Settings, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FolderPlus, Hash, Lock, Plus, Settings, X } from "lucide-react";
+import { Menu } from "@/components/Menu";
 import type { ManageTarget } from "@/components/chat/Manage";
 import { formatPreviewTime } from "@/lib/chat/format";
-import { sections } from "@/lib/chat/order";
+import { categoryOrder, sections } from "@/lib/chat/order";
 import {
   notificationLevel,
   type Group as GroupType,
@@ -50,6 +51,8 @@ type GroupProps = {
   onDropGroup: (dragId: string, position: DropPosition) => void;
   /** A dragged channel dropped into this group's `category` section, before `beforeId` (null: its end). */
   onDropChannel: (dragId: string, category: string | undefined, beforeId: string | null) => void;
+  /** A dragged category (by name) moved before `before` (null: last). */
+  onMoveCategory: (name: string, before: string | null) => void;
 };
 
 export default function Group({
@@ -74,6 +77,7 @@ export default function Group({
   onDecline,
   onDropGroup,
   onDropChannel,
+  onMoveCategory,
 }: GroupProps) {
   const draggable = useDraggable({ kind: "group", id: group.id });
   const dragGroup = reorderable ? draggable : {};
@@ -130,7 +134,20 @@ export default function Group({
   const totalUnread = unreadIn(group.subgroups);
   const totalMentions = mentionsIn(group.subgroups);
   const listId = `group-${group.id}-channels`;
-  const { loose, categories } = sections(group.subgroups);
+  const { loose, categories } = sections(group.subgroups, group.categories);
+
+  /** Category `dragName` dropped before or after `target`'s header. */
+  function dropCategory(dragName: string, target: string, position: DropPosition) {
+    if (dragName === target) return;
+    const others = categoryOrder(group).filter((c) => c !== dragName);
+    const at = others.indexOf(target);
+    const before = position === "after" ? (others[at + 1] ?? null) : target;
+    const current = categoryOrder(group);
+    const next = current.indexOf(dragName) + 1;
+    // Already there: dropped just around itself.
+    if ((current[next] ?? null) === before) return;
+    onMoveCategory(dragName, before);
+  }
   const open = group.subgroups.some((s) => s.id === activeId);
   // Filtering shows the group's matching channels (all of them when its name matches), opened.
   const nameMatches = !filter || group.name.toLowerCase().includes(filter);
@@ -161,15 +178,35 @@ export default function Group({
         // Siblings of the header button (buttons can't nest), over its right end. Hover-only
         // with a mouse; always shown on touch screens.
         <div className="absolute top-1.5 right-1.5 z-10 flex gap-0.5 rounded-md bg-surface-2 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100 pointer-coarse:bg-transparent pointer-coarse:opacity-100">
-          <button
-            type="button"
-            onClick={() => onManage({ kind: "channel", groupId: group.id })}
-            aria-label={`Add a channel to ${group.name}`}
-            title="Add channel"
-            className="rounded-md p-1.5 text-muted hover:text-foreground"
-          >
-            <Plus className="size-3.5 pointer-coarse:size-4" />
-          </button>
+          <Menu
+            label={`Add to ${group.name}`}
+            align="end"
+            className="w-52"
+            items={[
+              {
+                label: "New channel",
+                icon: <Hash className="size-4" />,
+                onSelect: () => onManage({ kind: "channel", groupId: group.id }),
+              },
+              {
+                label: "New category",
+                description: "A sidebar section to put channels in",
+                icon: <FolderPlus className="size-4" />,
+                onSelect: () => onManage({ kind: "settings", groupId: group.id, section: "categories" }),
+              },
+            ]}
+            trigger={(props) => (
+              <button
+                type="button"
+                {...props}
+                aria-label={`Add a channel or category to ${group.name}`}
+                title="Add channel or category"
+                className="rounded-md p-1.5 text-muted hover:text-foreground"
+              >
+                <Plus className="size-3.5 pointer-coarse:size-4" />
+              </button>
+            )}
+          />
           <button
             type="button"
             onClick={() => onManage({ kind: "settings", groupId: group.id, section: "overview" })}
@@ -237,7 +274,8 @@ export default function Group({
           {matching(loose).length > 0 && <ul className="space-y-px">{renderChannels(matching(loose))}</ul>}
           {categories.map(([category, all]) => {
             const list = matching(all);
-            if (list.length === 0) return null;
+            // Empty categories show to those who arrange channels (somewhere to drop them), not while filtering.
+            if (list.length === 0 && (all.length > 0 || filter || !arrangeable)) return null;
             // Filtering opens every section; otherwise a closed one still shows where you are and what's unread.
             const closed = !filter && collapsedCategories.has(`${group.id}/${category}`);
             const shown = closed
@@ -254,8 +292,13 @@ export default function Group({
                 hiddenUnread={unreadIn(list) + mentionsIn(list) - unreadIn(shown) - mentionsIn(shown) > 0}
                 onToggle={() => onToggleCategory(category)}
                 onDropChannel={(dragId) => onDropChannel(dragId, category, null)}
+                onDropCategory={(dragName, position) => dropCategory(dragName, category, position)}
               >
-                {renderChannels(shown)}
+                {all.length === 0 ? (
+                  <li className="px-2 py-1 text-xs text-muted italic">No channels yet. Drag one here.</li>
+                ) : (
+                  renderChannels(shown)
+                )}
               </CategorySection>
             );
           })}
@@ -297,10 +340,11 @@ function CategorySection({
   hiddenUnread,
   onToggle,
   onDropChannel,
+  onDropCategory,
   children,
 }: {
   groupId: string;
-  /** Channels can be dropped here (you manage the group). */
+  /** Channels and categories can be dropped here, and it can be dragged (you manage the group). */
   arrangeable: boolean;
   category: string;
   closed: boolean;
@@ -309,13 +353,17 @@ function CategorySection({
   onToggle: () => void;
   /** A channel dropped on the header goes to the end of this section. */
   onDropChannel: (dragId: string) => void;
+  /** Another of the group's categories dropped before or after this one's header. */
+  onDropCategory: (dragName: string, position: DropPosition) => void;
   children: React.ReactNode;
 }) {
+  const drag = useDraggable({ kind: "category", id: category, groupId });
   const target = useDropTarget(
     `category:${groupId}/${category}`,
-    (item) => arrangeable && item.kind === "channel",
-    (item) => onDropChannel(item.id),
-    () => false,
+    (item) => arrangeable && (item.kind === "channel" || (item.kind === "category" && item.groupId === groupId && item.id !== category)),
+    (item, position) => (item.kind === "category" ? onDropCategory(item.id, position) : onDropChannel(item.id)),
+    // A channel goes into the section; a category goes above or below it.
+    (item) => item.kind === "category",
   );
   return (
     <div className="mt-2 first:mt-0">
@@ -323,6 +371,7 @@ function CategorySection({
         <DropIndicator position={target.position} />
         <button
           type="button"
+          {...(arrangeable ? drag : {})}
           onClick={onToggle}
           aria-expanded={!closed}
           aria-controls={sectionId}

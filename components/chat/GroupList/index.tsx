@@ -21,11 +21,13 @@ import {
 import Menu from "@/components/Menu";
 import Input from "@/components/form/Input";
 import type { ManageTarget } from "@/components/chat/Manage";
+import { modifierKey } from "@/components/chat/QuickSwitcher";
 import { CustomStatus, PRESENCE_LABELS } from "@/components/chat/Status";
 import { mainChannel, moveChannel, moveGroup } from "@/lib/chat/order";
 import { useChatContext } from "@/components/chat/Core/ChatContext";
 import { formatPreviewTime } from "@/lib/chat/format";
-import { usePersistentSet } from "@/lib/chat/prefs";
+import { COLLAPSED_SECTIONS, usePersistentSet } from "@/lib/chat/prefs";
+import { useT } from "@/lib/i18n";
 import {
   canManageGroup,
   dmName,
@@ -65,6 +67,8 @@ type GroupListProps = {
   /** Open the dialog for your presence and custom status. */
   onSetStatus: () => void;
   onOpenSettings: () => void;
+  /** Open the quick switcher (also Ctrl+K anywhere). */
+  onQuickSwitch: () => void;
 };
 
 export default function GroupList({
@@ -81,7 +85,9 @@ export default function GroupList({
   onNewDm,
   onSetStatus,
   onOpenSettings,
+  onQuickSwitch,
 }: GroupListProps) {
+  const t = useT();
   const {
     state,
     setStatus,
@@ -89,13 +95,14 @@ export default function GroupList({
     // of groups you manage (everyone's order). Each resolves to an error message.
     reorderGroups: onReorderGroups,
     moveChannel: onMoveChannel,
+    moveCategory: onMoveCategory,
     // Join or decline a group you were invited to.
     joinGroup: onJoinGroup,
     declineInvite: onDeclineInvite,
     markAllRead,
   } = useChatContext();
   // Group ids, and "groupId/category" for category sections.
-  const [collapsed, toggle] = usePersistentSet("obsidian-chat:collapsed");
+  const [collapsed, toggle] = usePersistentSet(COLLAPSED_SECTIONS);
   // Holds "custom" when you'd rather see your groups in your own (dragged) order.
   const [sortPrefs, toggleSort] = usePersistentSet("obsidian-chat:sort");
   const recent = !sortPrefs.has("custom");
@@ -197,6 +204,7 @@ export default function GroupList({
         type="button"
         onClick={() => onSelect(channelId)}
         aria-current={active ? "page" : undefined}
+        data-channel={channelId}
         className={cn(
           "mb-0.5 flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors",
           active ? "bg-accent/15" : "hover:bg-surface-2",
@@ -232,7 +240,7 @@ export default function GroupList({
         <div aria-hidden className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={onClose} />
       )}
       <aside
-        aria-label="Groups"
+        aria-label={t("sidebar.groups")}
         className={cn(
           // A frosted drawer over the chat on small screens.
           "fixed inset-y-0 left-0 z-40 flex w-72 shrink-0 flex-col border-r border-border bg-surface transition-[translate,visibility] duration-200 md:static md:translate-x-0",
@@ -248,26 +256,26 @@ export default function GroupList({
               aria-hidden
               className={cn("size-2 rounded-full", connected ? "bg-online" : "animate-pulse bg-warning")}
             />
-            <span className={cn(connected && "sr-only")}>{connected ? "Connected" : "Reconnecting…"}</span>
+            <span className={cn(connected && "sr-only")}>{connected ? t("sidebar.connected") : t("sidebar.reconnecting")}</span>
           </span>
           <span className="ml-auto flex shrink-0 items-center">
             {(canCreateGroup || onNewDm) && (
               <Menu
-                label="Start something"
+                label={t("sidebar.start")}
                 align="end"
                 className="w-56"
                 items={[
-                  ...(onNewDm ? [{ label: "New message", icon: <SquarePen className="size-4" />, onSelect: onNewDm }] : []),
+                  ...(onNewDm ? [{ label: t("sidebar.newMessage"), icon: <SquarePen className="size-4" />, onSelect: onNewDm }] : []),
                   ...(canCreateGroup
-                    ? [{ label: "Create group", icon: <Users className="size-4" />, onSelect: () => onManage({ kind: "group" }) }]
+                    ? [{ label: t("sidebar.createGroup"), icon: <Users className="size-4" />, onSelect: () => onManage({ kind: "group" }) }]
                     : []),
                 ]}
                 trigger={(props) => (
                   <button
                     type="button"
                     {...props}
-                    aria-label="Start something"
-                    title="New message or group"
+                    aria-label={t("sidebar.start")}
+                    title={t("sidebar.startTitle")}
                     className="rounded-lg p-2 text-muted hover:bg-surface-2 hover:text-foreground aria-expanded:bg-surface-2 aria-expanded:text-foreground"
                   >
                     <Plus className="size-4" />
@@ -278,7 +286,7 @@ export default function GroupList({
             <button
               type="button"
               onClick={onClose}
-              aria-label="Close groups"
+              aria-label={t("sidebar.close")}
               className="rounded-lg p-2 text-muted hover:bg-surface-2 hover:text-foreground md:hidden"
             >
               <X className="size-4" />
@@ -303,7 +311,7 @@ export default function GroupList({
           </button>
           <div className="relative">
             <label htmlFor="sidebar-find" className="sr-only">
-              Find a chat
+              {t("sidebar.find")}
             </label>
             <Search aria-hidden className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted" />
             <Input
@@ -311,7 +319,7 @@ export default function GroupList({
               size="sm"
               type="search"
               value={query}
-              placeholder="Find a chat"
+              placeholder={t("sidebar.find")}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Escape" && query) {
@@ -319,24 +327,41 @@ export default function GroupList({
                   setQuery("");
                 }
               }}
-              className="pl-8"
+              className="pl-8 md:pr-16"
             />
+            {/* Keyboard users jump anywhere with the quick switcher; this says how (and opens it). */}
+            {!query && (
+              <button
+                type="button"
+                onClick={onQuickSwitch}
+                title={t("sidebar.jump")}
+                className="absolute top-1/2 right-1.5 hidden -translate-y-1/2 items-center gap-0.5 rounded-md px-1 py-0.5 text-muted hover:bg-surface hover:text-foreground md:flex"
+              >
+                <span className="sr-only">{t("sidebar.jump")}</span>
+                <kbd aria-hidden className="rounded border border-border bg-surface px-1 font-sans text-[10px] font-medium">
+                  {modifierKey()}
+                </kbd>
+                <kbd aria-hidden className="rounded border border-border bg-surface px-1 font-sans text-[10px] font-medium">
+                  K
+                </kbd>
+              </button>
+            )}
           </div>
         </div>
 
-        <nav aria-label="Chats" className="flex-1 overflow-y-auto p-2 pt-1">
+        <nav aria-label={t("sidebar.chats")} className="flex-1 overflow-y-auto p-2 pt-1">
           <div className="flex h-8 items-center gap-1 px-2">
-            <h2 className="flex-1 text-[11px] font-semibold tracking-wide text-muted uppercase">Chats</h2>
+            <h2 className="flex-1 text-[11px] font-semibold tracking-wide text-muted uppercase">{t("sidebar.chats")}</h2>
             <Menu
-              label="Chat list options"
+              label={t("sidebar.listOptions")}
               className="w-56"
               items={[
-                { kind: "label", label: "Sort by" },
-                { label: "Recent activity", checked: recent, onSelect: () => !recent && toggleSort("custom") },
-                { label: "My order (drag to arrange)", checked: !recent, onSelect: () => recent && toggleSort("custom") },
+                { kind: "label", label: t("sidebar.sortBy") },
+                { label: t("sidebar.sortRecent"), checked: recent, onSelect: () => !recent && toggleSort("custom") },
+                { label: t("sidebar.sortCustom"), checked: !recent, onSelect: () => recent && toggleSort("custom") },
                 { kind: "separator" },
                 {
-                  label: "Mark all as read",
+                  label: t("sidebar.markAllRead"),
                   icon: <CheckCheck className="size-4" />,
                   disabled: !connected,
                   onSelect: () => void run(markAllRead()),
@@ -346,8 +371,8 @@ export default function GroupList({
                 <button
                   type="button"
                   {...props}
-                  aria-label="Chat list options"
-                  title="Sort and mark read"
+                  aria-label={t("sidebar.listOptions")}
+                  title={t("sidebar.listOptionsTitle")}
                   className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-foreground aria-expanded:bg-surface-2"
                 >
                   <ArrowDownUp className="size-4" />
@@ -393,6 +418,7 @@ export default function GroupList({
                 onDecline={() => void run(onDeclineInvite(group.id))}
                 onDropGroup={(dragId, position) => dropGroup(dragId, group.id, position)}
                 onDropChannel={(dragId, category, beforeId) => dropChannel(dragId, group.id, category, beforeId)}
+                onMoveCategory={(name, before) => void run(onMoveCategory(group.id, name, before))}
               />
             );
           })}
@@ -416,7 +442,7 @@ export default function GroupList({
         {self && (
           <footer className="flex shrink-0 items-center gap-1 border-t border-border p-2">
             <Menu
-              label="Your account"
+              label={t("sidebar.account")}
               side="top"
               className="w-64"
               header={
@@ -429,22 +455,22 @@ export default function GroupList({
                 </span>
               }
               items={[
-                { kind: "label", label: "Presence" },
+                { kind: "label", label: t("sidebar.presence") },
                 ...PRESENCES.map((presence) => ({
                   label: PRESENCE_LABELS[presence].label,
                   checked: state.presence === presence,
                   disabled: !connected,
                   onSelect: () => void setStatus({ presence }),
                 })),
-                { label: "Set a custom status…", icon: <Smile className="size-4" />, onSelect: onSetStatus },
+                { label: t("sidebar.customStatus"), icon: <Smile className="size-4" />, onSelect: onSetStatus },
                 { kind: "separator" },
-                { label: "Edit profile", icon: <Pencil className="size-4" />, onSelect: onEditProfile },
-                { label: "Settings", icon: <Settings className="size-4" />, onSelect: onOpenSettings },
+                { label: t("sidebar.editProfile"), icon: <Pencil className="size-4" />, onSelect: onEditProfile },
+                { label: t("sidebar.settings"), icon: <Settings className="size-4" />, onSelect: onOpenSettings },
                 ...(onOpenAdmin
-                  ? [{ label: "Instance admin", icon: <ShieldCheck className="size-4" />, onSelect: onOpenAdmin }]
+                  ? [{ label: t("sidebar.admin"), icon: <ShieldCheck className="size-4" />, onSelect: onOpenAdmin }]
                   : []),
                 { kind: "separator" },
-                { label: "Sign out", icon: <LogOut className="size-4" />, danger: true, onSelect: onSignOut },
+                { label: t("sidebar.signOut"), icon: <LogOut className="size-4" />, danger: true, onSelect: onSignOut },
               ]}
               trigger={(props) => (
                 <button
@@ -458,7 +484,7 @@ export default function GroupList({
                     <span className="block truncate text-sm font-medium">{self.name}</span>
                     <span className="block truncate text-xs text-muted">
                       {!connected ? (
-                        "Offline"
+                        t("sidebar.offline")
                       ) : self.statusEmoji || self.statusText ? (
                         <CustomStatus user={self} />
                       ) : (
@@ -473,8 +499,8 @@ export default function GroupList({
             <button
               type="button"
               onClick={onOpenSettings}
-              aria-label="Settings"
-              title="Settings"
+              aria-label={t("sidebar.settings")}
+              title={t("sidebar.settings")}
               className="rounded-md p-2 text-muted hover:bg-surface-2 hover:text-foreground"
             >
               <Settings className="size-4" />
